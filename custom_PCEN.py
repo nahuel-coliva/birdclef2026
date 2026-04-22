@@ -88,7 +88,23 @@ class F2M(nn.Module):
         spec_m = F.linear(spec_f, self.fb.T)
         return spec_m
 
+@torch.compile
+def compiled_M(x, s, T, device):
+    s_x = x.mul(s)
+    s_x[:,0,:] = x[:,0,:]
+
+    powers = (1 - s) ** -torch.arange(T, device=device)  # [T]
+    
+    # reshape per broadcasting: [1, T, 1]
+    powers = powers.view(1, T, 1)
+    
+    M = s_x * powers
+    M = torch.cumsum(M, dim=1) / powers
+    return M
+
 def pcen(x, eps=1E-6, s=0.025, alpha=0.98, delta=2, r=0.5, training=False, last_state=None, empty=True):
+    """
+    # OLD
     frames = x.split(1, -2)
     m_frames = []
     if empty:
@@ -105,6 +121,30 @@ def pcen(x, eps=1E-6, s=0.025, alpha=0.98, delta=2, r=0.5, training=False, last_
         last_state = m_frame
         m_frames.append(m_frame)
     M = torch.cat(m_frames, 1)
+    """
+    # DEBUG: proviamo a ricostruire M in maniera più rapida, tanto di last_state non ci importa
+    #print(x.shape) = print(M.shape) = [64, 501, 200] = [B, T, mel]
+    # NEW
+    """
+    device = x.device
+    s_x = x.mul(s)
+    s_x[:,0,:] = x[:,0,:]
+
+    _, T, _ = s_x.shape
+    
+    powers = (1 - s) ** -torch.arange(T, device=device)  # [T]
+    
+    # reshape per broadcasting: [1, T, 1]
+    powers = powers.view(1, T, 1)
+    
+    M = s_x * powers
+    M = torch.cumsum(M, dim=1) / powers
+    """
+    device = x.device
+    _, T, _ = x.shape
+    M = compiled_M(x, s, T, device)
+    # FINE DEBUG
+
     if training:
         pcen_ = (x / (M + eps).pow(alpha) + delta).pow(r) - delta ** r
     else:
@@ -164,3 +204,5 @@ class StreamingPCENTransform(nn.Module):
         self.last_state = ls.detach()
         self.empty = False
         return x
+
+    

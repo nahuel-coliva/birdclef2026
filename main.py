@@ -129,7 +129,10 @@ class PCENFrontend(nn.Module):
             n_mels=n_mels,
             n_fft=n_fft,
             hop_length=hop_length,
-            sr=sample_rate
+            sr=sample_rate,
+            # DEBUG: dobbiamo passare device anche qua e sotto, intanto metto una pezza
+            use_cuda_kernel=True
+            # FINE DEBUG
         ).cuda()
     
     def forward(self, x):
@@ -154,6 +157,9 @@ class PCENFrontend(nn.Module):
         return torch.nn.functional.layer_norm(pcen, (pcen.shape[-1],), eps=1e-6)
     
 
+@torch.compile
+def change_dimensions(x):
+    return x.unsqueeze(1).repeat(1, 3, 1, 1)
 
 
 class BirdModel(nn.Module):
@@ -195,8 +201,10 @@ class BirdModel(nn.Module):
         for p in self.backbone.features.parameters():
             p.requires_grad = False
 
-        #DEBUG: da capire se il primo layer è trainable così
-        # modifica primo layer per 1 canale (invece di 3)
+        # Modifica primo layer per 1 canale (invece di 3)
+        """
+        # OPTION A: new trainable layer with 1 channel in, same channels out
+        # OPTION B: see forward() method
         first_conv = self.backbone.features[0][0]
         self.backbone.features[0][0] = nn.Conv2d(
             in_channels=1,
@@ -206,6 +214,7 @@ class BirdModel(nn.Module):
             padding=first_conv.padding,
             bias=False
         )
+        """
 
         # testa di classificazione
         in_features = self.backbone.classifier[1].in_features
@@ -215,7 +224,12 @@ class BirdModel(nn.Module):
 
     def forward(self, x):
         """
-        x: [B, T]
+        input x: [B, T]
+        post-frontend: [B, mel, time]
+        pre-backbone:
+            OPTION A: [B, 1, mel, time]
+            OPTION B: [B, 3, mel, time] ACTIVE NOW!
+        post-backbone: [B, num_classes]
         """
 
         x = self.frontend(x)   # [B, mel, time]
@@ -229,8 +243,14 @@ class BirdModel(nn.Module):
         """
         #FINE DEBUG
         
+        """
+        # OPTION A: see __init__() method
+        x = self.backbone(x.unsqueeze(1))
+        # OPTION B: repeat the spectrogram over 3 channels
+        """
         # aggiungi channel dim
-        x = self.backbone(x.unsqueeze(1))   # [B, num_classes]
+        #x = self.backbone(x.unsqueeze(1).repeat(1, 3, 1, 1))   # [B, num_classes]
+        x = self.backbone(change_dimensions(x))   # [B, num_classes]
 
         return x
     
@@ -485,8 +505,9 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
 
         true_start = time.perf_counter()
         for x, y, _, _ in train_loader:
+            #start_batch = time.perf_counter()
             batch += 1
-            if batch%500==0:
+            if batch%10==0:
                 print("Batch "+str(batch)+"/"+str(int(total_batches/batch_size)))
             x, y = x.to(device), y.to(device)
 
@@ -526,7 +547,6 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
             loss = criterion(outputs, y)
             loss.backward()
             optimizer.step()
-            
 
             running_loss += loss.item() * x.size(0)
             running_f1 += batch_f1(y, torch.sigmoid(outputs)) * x.size(0)
@@ -542,6 +562,9 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
             
             running_ROCAUC += birdCLEF_ROCAUC.score(solution=y_true, submission=y_pred_df, row_id_column_name="row_id") * x.size(0)
             #FINE DEBUG
+
+            #end_batch = time.perf_counter()
+            #input(f"Total batch time: {end_batch - start_batch:.6f} secondi")
 
         true_end = time.perf_counter()
         print(f"Epoch running time: {(true_end - true_start)/60:.6f} minutes")
@@ -637,7 +660,7 @@ if __name__ == "__main__":
     hops = [320]
     n_fft = [320*4] #il default presente in documentazione è n_hops = floor(n_fft / 4)
     n_mels = [200]
-    session_ID = "bigger_dataset_2"
+    session_ID = "bigger_dataset_3_channels"
 
     num_epochs = 30
 
