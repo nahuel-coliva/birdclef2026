@@ -2,6 +2,7 @@
 data/
 old/
 results/
+*.wav
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

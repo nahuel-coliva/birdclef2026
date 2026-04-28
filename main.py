@@ -65,7 +65,7 @@ class SoundscapeDataset(Dataset):
 
         # carica audio già resamplato a 32kHz
         # DEBUG: performance test SENZA cache
-        
+        """
         # OLD: with cache
         if filepath not in self.cache:
             if len(self.cache) >= self.cache_size:
@@ -77,7 +77,7 @@ class SoundscapeDataset(Dataset):
         """
         # NEW: no cache
         audio, _ = librosa.load(filepath, sr=self.sample_rate)
-        """
+        
         # FINE DEBUG
 
         chunk = audio[start:start + self.chunk_size]
@@ -380,6 +380,8 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     	sample_rate=sample_rate
     )
 
+    print("Datasets object ready")
+
     # TRAIN LOOP: setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -411,7 +413,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
 
     
     train_workers = 1
-    batch_size=64
+    batch_size=32
     lr = 0.01*batch_size/256
 
     model = BirdModel(num_classes=num_classes,
@@ -427,6 +429,8 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         {"params": model.frontend.pcen.parameters(), "lr": lr/10}
     ])
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
+    model.compile()
+    print("Model compiled")
 
     # Model complexity vs dataset size
     trainable = count_trainable_params(model)
@@ -507,7 +511,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         for x, y, _, _ in train_loader:
             #start_batch = time.perf_counter()
             batch += 1
-            if batch%10==0:
+            if batch%500==0:
                 print("Batch "+str(batch)+"/"+str(int(total_batches/batch_size)))
             x, y = x.to(device), y.to(device)
 
@@ -542,6 +546,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
             # FINE DEBUG
 
             """
+
             optimizer.zero_grad(set_to_none=True) #parameter suggested by pytorch performance tuning guide
             outputs = model(x)  # logits (sigmoid in forward opzionale quindi la applichiamo dopo)
             loss = criterion(outputs, y)
@@ -660,7 +665,7 @@ if __name__ == "__main__":
     hops = [320]
     n_fft = [320*4] #il default presente in documentazione è n_hops = floor(n_fft / 4)
     n_mels = [200]
-    session_ID = "bigger_dataset_3_channels"
+    session_ID = "1_point_5M_dataset_3_channels"
 
     num_epochs = 30
 

@@ -6,6 +6,7 @@ import soundfile as sf
 import librosa
 import random
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # background_pool = lista di np.array (audio 5s)
 # bird_mix = np.array già mixato da te (stessa lunghezza dei background)
@@ -19,19 +20,22 @@ def normalize_audio(x):
         x = x / max_val
     return x
 
-def create_and_save_sample(background_pool, bird_pool, sr=32000, out_path="sample.wav"):
+def create_and_save_sample(background_pool, bird_pool, sr=32000, out_path="sample.wav", process_ID=0):
     background_filenames_pool = background_pool["filepath"].unique()
     bird_labels_pool = bird_pool["label"].unique()
 
     # 1️⃣ scegli 2 background random
     background_row_1 = background_pool[background_pool["filepath"]==random.choice(background_filenames_pool)].sample(1).iloc[0]
     background_row_2 = background_pool[background_pool["filepath"]==random.choice(background_filenames_pool)].sample(1).iloc[0]
+    background_row_3 = background_pool[background_pool["filepath"]==random.choice(background_filenames_pool)].sample(1).iloc[0]
 
 
     bg1, _ = librosa.load(background_row_1["filepath"] , sr=sr)
     bg1 = bg1[background_row_1["start"]:background_row_1["start"]+sr*5]
     bg2, _ = librosa.load(background_row_2["filepath"] , sr=sr)
     bg2 = bg2[background_row_2["start"]:background_row_2["start"]+sr*5]
+    bg3, _ = librosa.load(background_row_3["filepath"] , sr=sr)
+    bg3 = bg3[background_row_3["start"]:background_row_3["start"]+sr*5]
     
 
     birds_number = random.choice([0, 1, 2, 3, 4])
@@ -56,6 +60,7 @@ def create_and_save_sample(background_pool, bird_pool, sr=32000, out_path="sampl
     mix = (
         bg1 * random_gain(0.3, 1.0) +
         bg2 * random_gain(0.3, 1.0) +
+        bg3 * random_gain(0.3, 1.0) +
         bird_mix
     )
 
@@ -70,14 +75,17 @@ def create_and_save_sample(background_pool, bird_pool, sr=32000, out_path="sampl
     name = os.path.splitext(os.path.basename(background_row_2["filepath"]))[0]
     bg2_name = name.rsplit("_", 2)[0]
 
-    filename = bg1_name+"_"+str(int(background_row_1["start"]/sr))+"_"+bg2_name+"_"+str(int(background_row_2["start"]/sr))
+    name = os.path.splitext(os.path.basename(background_row_2["filepath"]))[0]
+    bg3_name = name.rsplit("_", 2)[0]
+
+    filename = bg1_name+"_"+str(int(background_row_1["start"]/sr)).zfill(2)+"_"+bg2_name+"_"+str(int(background_row_2["start"]/sr)).zfill(2)+"_"+bg3_name+"_"+str(int(background_row_3["start"]/sr)).zfill(2)
     for bird_row in bird_rows:
         filename += "_"+os.path.basename(os.path.dirname(bird_row["filepath"]))
     filename += ".ogg"
 
     out_path = os.path.join(out_path, filename)
     #print("Salvo in "+out_path)
-    save_as_ogg(out_path=out_path, mix=mix, sr=sr)
+    save_as_ogg(out_path=out_path, mix=mix, sr=sr, i=process_ID)
 
     """
     print("Creato synthetic audio")
@@ -141,8 +149,8 @@ def create_and_save_background_sample(background_pool, sr=32000, out_path="sampl
 
     return mix
 
-def save_as_ogg(mix, sr, out_path="sample.ogg"):
-    tmp_wav = "temp.wav"
+def save_as_ogg(mix, sr, out_path="sample.ogg", i=0):
+    tmp_wav = "temp_"+str(i)+".wav"
 
     # 1️⃣ salva WAV
     sf.write(tmp_wav, mix.astype("float32"), sr)
@@ -242,6 +250,8 @@ def generate_train_audio_df(root_dir):
 
 sr = 32000
 root_dir="./data/train_soundscapes"
+train_validation = "validation"
+print("Sound factory for: "+train_validation)
 
 # Trovare tutte le finestre di soundscapes senza specie
 df = pd.read_csv("./data/train_soundscapes_labels_OG.csv").drop_duplicates()
@@ -286,8 +296,12 @@ if soundscape_with_background_flag:
     df.to_csv("./data/train_soundscapes_v2.csv", index=False)
     input("Fermooo")
 
-# Sezione "background senza labels"
 
+# Sezione "background senza labels": teniamo BC2026_Train_0006_S09_20250828_000000.ogg per il validation set
+if train_validation=="train":
+    no_labels_df = no_labels_df[no_labels_df["filename"]!="BC2026_Train_0006_S09_20250828_000000.ogg"]
+else:
+    no_labels_df = no_labels_df[no_labels_df["filename"]=="BC2026_Train_0006_S09_20250828_000000.ogg"]
 background_samples = build_samples_audio_df(root_dir=root_dir, df=no_labels_df)
 
 
@@ -295,6 +309,8 @@ background_samples = build_samples_audio_df(root_dir=root_dir, df=no_labels_df)
 """
 background_samples = build_samples_audio_df(root_dir=root_dir, df=insects_df)
 """
+
+print(no_labels_df.shape[0])
 print("Background OK")
 
 #
@@ -302,6 +318,8 @@ print("Background OK")
 #
 birds_flag = True #whether we need or not bird samples
 if birds_flag:
+    """
+    # In case ./data/train_audio_windows.csv was not available
     root_dir = "./data/train_audio"
     birds_df = generate_train_audio_df(root_dir=root_dir)
 
@@ -310,17 +328,50 @@ if birds_flag:
     # salva csv
     birds_df.to_csv("./data/train_audio_windows.csv", index=False)
 
+    # Generate train/validation split for single mono-bird audio
+    birds_df = pd.read_csv("./data/train_audio_windows.csv")
+    birds_df["train_validation_split"] = "train"
+
+    split_birds_df = pd.DataFrame()
+    for bird in birds_df["primary_label"].unique():
+        single_bird_df = birds_df[birds_df["primary_label"]==bird].copy()
+        i = 1
+        validation_files = []
+        for file in single_bird_df["filename"].unique():
+            if i%5==0:
+                validation_files.append(file)
+            i += 1
+        
+        validation_mask = single_bird_df["filename"].isin(validation_files)
+        single_bird_df.loc[validation_mask, "train_validation_split"] = "validation"
+
+        split_birds_df = pd.concat([split_birds_df, single_bird_df], ignore_index=True)
+
+    split_birds_df.to_csv("./data/train_validation_split_for_birds.csv", index=False)
+
+    for bird in split_birds_df["primary_label"].unique():
+        print("Bird: "+bird)
+        print("Train samples: "+str(birds_df[(birds_df["primary_label"]==bird) & (birds_df["train_validation_split"]=="train")].shape[0])+ " / Validation samples: "+str(birds_df[(birds_df["primary_label"]==bird) & (birds_df["train_validation_split"]=="validation")].shape[0]))
+        print()
+    input(":)")
+
+    """
+    root_dir = "./data/train_audio"
+    
+    birds_df = pd.read_csv("./data/train_validation_split_for_birds.csv")
+
+    birds_df = birds_df[birds_df["train_validation_split"]==train_validation]
     birds_df["start"] = pd.to_timedelta(birds_df["start"]).dt.total_seconds()
     birds_df["end"] = pd.to_timedelta(birds_df["end"]).dt.total_seconds()
 
     bird_samples = build_samples_audio_df(root_dir=root_dir, df=birds_df, label_in_path_flag=True)
 
+    print(birds_df.shape[0])
     print("Birds samples OK")
 else:
     print("No birds requested")
 
-results_path = "./data/synthetic_validation_soundscapes"
-#results_path = "./data/synthetic_train_soundscapes"
+results_path = "./data/synthetic_"+train_validation+"_soundscapes"
 #results_path = "./data/test_insect_audio"
 
 Path(results_path).mkdir(parents=True, exist_ok=True)
@@ -331,12 +382,15 @@ for bird in bird_samples["label"].unique():
     print(bird+": "+str(bird_samples[bird_samples["label"]==bird].shape[0]))
 """
 
+print("Destination folder: "+results_path)
 
-n = 5000
+n = 25000
+process_ID = input("process_ID: ")
+
 for i in range(n):
-    if i%100==0:
+    if i%1000==0:
         print(str(i)+"/"+str(n))
     if birds_flag:
-        create_and_save_sample(background_pool=background_samples, bird_pool=bird_samples, out_path=results_path)
+        create_and_save_sample(background_pool=background_samples, bird_pool=bird_samples, out_path=results_path, process_ID=process_ID)
     else:
         create_and_save_background_sample(background_pool=background_samples, out_path=results_path)
