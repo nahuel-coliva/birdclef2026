@@ -6,7 +6,6 @@ import soundfile as sf
 import librosa
 import random
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # background_pool = lista di np.array (audio 5s)
 # bird_mix = np.array già mixato da te (stessa lunghezza dei background)
@@ -75,7 +74,7 @@ def create_and_save_sample(background_pool, bird_pool, sr=32000, out_path="sampl
     name = os.path.splitext(os.path.basename(background_row_2["filepath"]))[0]
     bg2_name = name.rsplit("_", 2)[0]
 
-    name = os.path.splitext(os.path.basename(background_row_2["filepath"]))[0]
+    name = os.path.splitext(os.path.basename(background_row_3["filepath"]))[0]
     bg3_name = name.rsplit("_", 2)[0]
 
     filename = bg1_name+"_"+str(int(background_row_1["start"]/sr)).zfill(2)+"_"+bg2_name+"_"+str(int(background_row_2["start"]/sr)).zfill(2)+"_"+bg3_name+"_"+str(int(background_row_3["start"]/sr)).zfill(2)

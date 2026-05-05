@@ -82,7 +82,8 @@ class SoundscapeDataset(Dataset):
 
         chunk = audio[start:start + self.chunk_size]
 
-        # padding se necessario
+        # padding se necessario : NON SEMBRA ESSERE MAI NECESSARIO, TOLGO
+        """
         if len(chunk) < self.chunk_size:
             pad = self.chunk_size - len(chunk)
 
@@ -95,6 +96,8 @@ class SoundscapeDataset(Dataset):
             )
         else:
             chunk = torch.tensor(chunk)
+        """
+        chunk = torch.tensor(chunk)
 
         label = self.build_label(labels)
 
@@ -157,7 +160,7 @@ class PCENFrontend(nn.Module):
         return torch.nn.functional.layer_norm(pcen, (pcen.shape[-1],), eps=1e-6)
     
 
-@torch.compile
+@torch.compile(mode="reduce-overhead")
 def change_dimensions(x):
     return x.unsqueeze(1).repeat(1, 3, 1, 1)
 
@@ -412,7 +415,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     print(max(pos_weights))
 
     
-    train_workers = 1
+    train_workers = 2
     batch_size=32
     lr = 0.01*batch_size/256
 
@@ -429,7 +432,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         {"params": model.frontend.pcen.parameters(), "lr": lr/10}
     ])
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
-    model.compile()
+    model.compile(mode="reduce-overhead")
     print("Model compiled")
 
     # Model complexity vs dataset size
@@ -443,7 +446,8 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     input("Quindi? Come siam messi?")
 
     # dataset: train_dataset e val_dataset già istanziati
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=train_workers, drop_last=True, pin_memory=True)
+    # pin_memory not needed unless something on CPU an something on GPU (now all on GPU)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=train_workers, drop_last=True)#, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=True, pin_memory=True)
 
     # TRAIN LOOP: execution
@@ -511,11 +515,9 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         for x, y, _, _ in train_loader:
             #start_batch = time.perf_counter()
             batch += 1
-            if batch%500==0:
+            if batch%5000==0:
                 print("Batch "+str(batch)+"/"+str(int(total_batches/batch_size)))
             x, y = x.to(device), y.to(device)
-
-            y_true = pd.DataFrame(y.cpu().numpy(), columns=species_list)
 
             """
             # DEBUG

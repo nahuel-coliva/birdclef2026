@@ -94,7 +94,24 @@ class F2M(nn.Module):
         spec_m = F.linear(spec_f, self.fb.T)
         return spec_m
 
+
+def compiled_M(x, s, T, device):
+    s_x = x.mul(s)
+    s_x[:,0,:] = x[:,0,:]
+
+    powers = (1 - s) ** -torch.arange(T, device=device)  # [T]
+    
+    # reshape per broadcasting: [1, T, 1]
+    powers = powers.view(1, T, 1)
+    
+    M = s_x * powers
+    M = torch.cumsum(M, dim=1) / powers
+    return M
+
+
 def pcen(x, eps=1E-6, s=0.025, alpha=0.98, delta=2, r=0.5, training=False, last_state=None, empty=True):
+    """
+    # OLD
     frames = x.split(1, -2)
     m_frames = []
     if empty:
@@ -111,6 +128,30 @@ def pcen(x, eps=1E-6, s=0.025, alpha=0.98, delta=2, r=0.5, training=False, last_
         last_state = m_frame
         m_frames.append(m_frame)
     M = torch.cat(m_frames, 1)
+    """
+    # DEBUG: proviamo a ricostruire M in maniera più rapida, tanto di last_state non ci importa
+    #print(x.shape) = print(M.shape) = [64, 501, 200] = [B, T, mel]
+    # NEW
+    """
+    device = x.device
+    s_x = x.mul(s)
+    s_x[:,0,:] = x[:,0,:]
+
+    _, T, _ = s_x.shape
+    
+    powers = (1 - s) ** -torch.arange(T, device=device)  # [T]
+    
+    # reshape per broadcasting: [1, T, 1]
+    powers = powers.view(1, T, 1)
+    
+    M = s_x * powers
+    M = torch.cumsum(M, dim=1) / powers
+    """
+    device = x.device
+    _, T, _ = x.shape
+    M = compiled_M(x, s, T, device)
+    # FINE DEBUG
+
     if training:
         pcen_ = (x / (M + eps).pow(alpha) + delta).pow(r) - delta ** r
     else:
@@ -187,14 +228,16 @@ class PCENFrontend(nn.Module):
     ):
         super().__init__()
 
-        # PCEN preso dal tuo codice copiato
         self.pcen = StreamingPCENTransform(
             trainable=trainable_pcen,
             n_mels=n_mels,
             n_fft=n_fft,
             hop_length=hop_length,
-            sr=sample_rate
-        ).to("cpu")
+            sr=sample_rate,
+            # DEBUG: dobbiamo passare device anche qua e sotto, intanto metto una pezza
+            use_cuda_kernel=False
+            # FINE DEBUG
+        ).to(DEVICE)
     
     def forward(self, x):
         """
@@ -218,7 +261,8 @@ class PCENFrontend(nn.Module):
         return torch.nn.functional.layer_norm(pcen, (pcen.shape[-1],), eps=1e-6)
     
 
-
+def change_dimensions(x):
+    return x.unsqueeze(1).repeat(1, 3, 1, 1)
 
 class BirdModel(nn.Module):
     def __init__(self,
@@ -228,6 +272,9 @@ class BirdModel(nn.Module):
                 hop_length=320,
                 n_mels=128,
                 trainable_pcen=True,
+                #DEBUG
+                epoch=0
+                #FINE DEBUG
     ):
         super().__init__()
         self.num_classes=num_classes
@@ -236,6 +283,10 @@ class BirdModel(nn.Module):
         self.hop_length=hop_length
         self.n_mels=n_mels
         self.trainable_pcen=trainable_pcen
+        #DEBUG
+        self.epoch=epoch
+        self.epoch_spectrogram_printing_flag = {0: 1, 20: 1}
+        #FINE DEBUG
 
         # frontend PCEN
         self.frontend = PCENFrontend(sample_rate=sample_rate,
@@ -246,15 +297,16 @@ class BirdModel(nn.Module):
         )
 
         # backbone pre-trained
-        #self.backbone = mobilenet_v2(weights=MobileNet_V2_Weights.DEFAULT)
-        # Pesi impostati None per submission
         self.backbone = mobilenet_v2(weights=None)
 
         # parameters freezing
         for p in self.backbone.features.parameters():
             p.requires_grad = False
 
-        # modifica primo layer per 1 canale (invece di 3)
+        # Modifica primo layer per 1 canale (invece di 3)
+        """
+        # OPTION A: new trainable layer with 1 channel in, same channels out
+        # OPTION B: see forward() method
         first_conv = self.backbone.features[0][0]
         self.backbone.features[0][0] = nn.Conv2d(
             in_channels=1,
@@ -264,6 +316,7 @@ class BirdModel(nn.Module):
             padding=first_conv.padding,
             bias=False
         )
+        """
 
         # testa di classificazione
         in_features = self.backbone.classifier[1].in_features
@@ -273,19 +326,38 @@ class BirdModel(nn.Module):
 
     def forward(self, x):
         """
-        x: [B, T]
+        input x: [B, T]
+        post-frontend: [B, mel, time]
+        pre-backbone:
+            OPTION A: [B, 1, mel, time]
+            OPTION B: [B, 3, mel, time] ACTIVE NOW!
+        post-backbone: [B, num_classes]
         """
 
         x = self.frontend(x)   # [B, mel, time]
-        
-        # aggiungi channel dim
-        #x = x.unsqueeze(1)     # [B, 1, mel, time]
-        x = self.backbone(x.unsqueeze(1))   # [B, num_classes]
 
-        return x # previously torch.sigmoid(x), wrong with BCEWithLogitsLoss
+        #DEBUG
+        """
+        if self.epoch_spectrogram_printing_flag.get(self.epoch, 0):
+            print("Vorrei plottare: "+str(x[0].shape))
+            self.plot_spectrogram(x[0])
+            self.epoch_spectrogram_printing_flag[self.epoch] = 0
+        """
+        #FINE DEBUG
+        
+        """
+        # OPTION A: see __init__() method
+        x = self.backbone(x.unsqueeze(1))
+        # OPTION B: repeat the spectrogram over 3 channels
+        """
+        # aggiungi channel dim
+        #x = self.backbone(x.unsqueeze(1).repeat(1, 3, 1, 1))   # [B, num_classes]
+        x = self.backbone(change_dimensions(x))   # [B, num_classes]
+
+        return x
 
 # === CONFIG ===
-MODEL_PATH = "./results/session_bigger_dataset_1/320_200/model_checkpoint.pth"
+MODEL_PATH = "./results/session_1_point_5M_dataset_3_channels/320_200/model_checkpoint.pth"
 TEST_DIR = "./data/validation_soundscapes"
 TAXONOMY_PATH = "./data/taxonomy.csv"
 SR = 32000
