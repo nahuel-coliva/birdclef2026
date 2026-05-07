@@ -1,10 +1,10 @@
 import warnings
 from sklearn.exceptions import UndefinedMetricWarning
 import json
-import time
 
 import os
 import pandas as pd
+import numpy as np
 import torch
 import librosa
 from torch.utils.data import Dataset
@@ -156,6 +156,9 @@ class PCENFrontend(nn.Module):
 
         return torch.nn.functional.layer_norm(pcen, (pcen.shape[-1],), eps=1e-6)
     
+    def get_pcen_parameters(self):
+        return self.pcen.get_parameters()
+    
 
 @torch.compile(mode="reduce-overhead")
 def change_dimensions(x):
@@ -276,6 +279,9 @@ class BirdModel(nn.Module):
         plt.colorbar(img, ax=axes, label="PCEN value")
         plt.tight_layout()
         plt.savefig(str("spectrogram_at_epoch_"+str(self.epoch)))
+    
+    def get_pcen_parameters(self):
+        return self.frontend.get_pcen_parameters()
     #FINE DEBUG
 
 
@@ -317,6 +323,10 @@ def count_trainable_params(model):
 def count_total_params(model):
     return sum(p.numel() for p in model.parameters())
 
+
+#
+# Keep the same validation code as the main loop, add per-class metrics
+#
 def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, num_epochs):
     #warning policy
     warnings.filterwarnings("ignore", category=UserWarning)
@@ -385,36 +395,47 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     # TRAIN LOOP: setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # pos_weights to correct imbalanced dataset
-    pos_weights = torch.zeros(num_classes, device=device)
+    try:
+        with open(results_path+"/pos_weights.json", "r") as a:
+            pos_weights_serial = json.load(a)
+        pos_weights = torch.Tensor(pos_weights_serial)
+        print("Loaded weights from "+results_path+"/pos_weights.json")
+    
+    except Exception as e:
+        print(e)
+        print("Computing weights")
+        # pos_weights to correct imbalanced dataset
+        pos_weights = torch.zeros(num_classes, device=device)
 
-    for _, _, labels in train_dataset.samples:
-        for label in labels:
-            if label in species_to_idx:
-                pos_weights[species_to_idx[label]] += 1
+        for _, _, labels in train_dataset.samples:
+            for label in labels:
+                if label in species_to_idx:
+                    pos_weights[species_to_idx[label]] += 1
 
-    print("Count")
+        total_samples = len(train_dataset.samples)
+        for i in range(len(pos_weights)):
+            pos_weights[i] += 1e-6
+            # Previously: pos_weights[i] = min(int((total_samples-pos_weights[i])/pos_weights[i]), 50)
+            # pos_weights[i] = max(min(int(total_samples/(pos_weights[i]*len(pos_weights))), 1000), 1)
+            pos_weights[i] = min(total_samples/(pos_weights[i]*len(pos_weights)), 100)
+
+        for i in range(len(pos_weights)):
+            pos_weights[i] /= min(pos_weights)
+
+        pos_weights_serial = pos_weights.tolist()
+        with open(results_path+"/pos_weights.json", "w") as a:
+            json.dump(pos_weights_serial, a)
+
+    """print("Count")
     print(str(pos_weights))
-
-    total_samples = len(train_dataset.samples)
-    for i in range(len(pos_weights)):
-        pos_weights[i] += 1e-6
-        # Previously: pos_weights[i] = min(int((total_samples-pos_weights[i])/pos_weights[i]), 50)
-        # pos_weights[i] = max(min(int(total_samples/(pos_weights[i]*len(pos_weights))), 1000), 1)
-        pos_weights[i] = min(total_samples/(pos_weights[i]*len(pos_weights)), 100)
-
-    for i in range(len(pos_weights)):
-        pos_weights[i] /= min(pos_weights)
 
     print("Weigths")
     print(str(pos_weights))
     print(min(pos_weights))
-    print(max(pos_weights))
+    print(max(pos_weights))"""
 
-    
-    train_workers = 2
-    batch_size=32
-    lr = 0.01*batch_size/256
+
+    batch_size=128
 
     model = BirdModel(num_classes=num_classes,
                     sample_rate=sample_rate,
@@ -423,42 +444,17 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
                     n_mels=n_mels,
                     trainable_pcen=True
                 ).to(device)
-    optimizer = torch.optim.Adam([
-        {"params": model.backbone.features.parameters(), "lr": lr/10},
-        {"params": model.backbone.classifier.parameters(), "lr": lr},
-        {"params": model.frontend.pcen.parameters(), "lr": lr/10}
-    ])
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
     model.compile(mode="reduce-overhead")
     print("Model compiled")
 
-    # Model complexity vs dataset size
-    trainable = count_trainable_params(model)
-    total = count_total_params(model)
-
-    print(f"Trainable: {trainable}")
-    print(f"Total: {total}")
-    print(f"Ratio (expected < 0.1 since MobileNet is a feature extractor): {trainable/total:.3f}")
-    print(f"Sample per param (expected 10-100): {df_train.shape[0]/trainable}")
-    input("Quindi? Come siam messi?")
+    input(model.get_pcen_parameters())
 
     # dataset: train_dataset e val_dataset già istanziati
-    # pin_memory not needed unless something on CPU and something on GPU (now all on GPU)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=train_workers, drop_last=True)#, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=True, pin_memory=True)
 
     # TRAIN LOOP: execution
     try:
-        with open(results_path+"/list_train_loss.json", "r") as a, open(results_path+"/list_train_recall.json", "r") as b, open(results_path+"/list_train_rocauc.json", "r") as c:
-            list_train_loss = json.load(a)
-            list_train_recall = json.load(b)
-            list_train_rocauc = json.load(c)
-
-        with open(results_path+"/list_val_loss.json", "r") as d, open(results_path+"/list_val_recall.json", "r") as e, open(results_path+"/list_val_rocauc.json", "r") as f:
-            list_val_loss = json.load(d)
-            list_val_recall = json.load(e)
-            list_val_rocauc = json.load(f)
-
         checkpoint = torch.load(results_path+"/model_checkpoint.pth", map_location=device)
         
         state_dict = checkpoint["model_state_dict"]
@@ -466,196 +462,74 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         checkpoint["model_state_dict"]["frontend.pcen.last_state"] = torch.zeros(n_mels)
         
         model.load_state_dict(state_dict)
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        starting_epoch = checkpoint["epoch"]
         print("Successfully loaded model "+str(results_path+"/model_checkpoint.pth"))
 
     except Exception as e:
         print(e)
         print("No previous run detected: setting up a new one")
-        list_train_loss = [0 for i in range(num_epochs)]
-        list_train_recall = [0 for i in range(num_epochs)]
-        list_train_rocauc = [0 for i in range(num_epochs)]
-        list_val_loss = [0 for i in range(num_epochs)]
-        list_val_recall = [0 for i in range(num_epochs)]
-        list_val_rocauc = [0 for i in range(num_epochs)]
-        starting_epoch = 0
 
-    fine_tuning_epoch_threshold = int(num_epochs*0.9)
-
-    for epoch in range(starting_epoch, num_epochs):
-        #DEBUG
-        model.set_epoch(epoch)
-        #FINE DEBUG
-
-        if epoch == starting_epoch:
-            print("Training started")
-        
-        # Final backbone fine tuning
-        if epoch>fine_tuning_epoch_threshold:
-            for p in model.backbone.features[-2:].parameters():
-                p.requires_grad = True
-            print("Fine tuning attivo")
-        
-        # -------------------
-        # TRAIN
-        # -------------------
-        model.train()
-        running_loss = 0.0
-        running_f1 = 0.0
-        running_ROCAUC = 0.0
-        running_recall = 0.0
-        total_batches = df_train.shape[0]
+    # -------------------
+    # VALIDATION
+    # -------------------
+    model.eval()
+    val_loss = 0.0
+    val_f1 = 0.0
+    val_ROCAUC = 0.0
+    val_recall = 0.0
+    per_class_val_ROCAUC = np.zeros(len(species_list))
+    spec_to_index_dict = {
+        species_list[i]:i for i in range(len(species_list))
+    }
+    spec_count_list = np.zeros(len(species_list))
+    with torch.no_grad():
         batch = 0
-
-        true_start = time.perf_counter()
-        for x, y, _, _ in train_loader:
-            #start_batch = time.perf_counter()
+        for x_val, y_val, _, _ in val_loader:
             batch += 1
-            if batch%5000==0:
-                print("Batch "+str(batch)+"/"+str(int(total_batches/batch_size)))
-            x, y = x.to(device), y.to(device)
-
-            """
-            # DEBUG
-            start = time.perf_counter()
-            optimizer.zero_grad(set_to_none=True) #parameter suggested by pytorch performance tuning guide
-            end = time.perf_counter()
-            print(f"Tempo optimizer: {end - start:.6f} secondi")
-
-            start = time.perf_counter()
-            outputs = model(x)  # logits (sigmoid in forward opzionale quindi la applichiamo dopo)
-            end = time.perf_counter()
-            print(f"Tempo forward: {end - start:.6f} secondi")
-
-            start = time.perf_counter()
-            loss = criterion(outputs, y)
-            end = time.perf_counter()
-            print(f"Tempo loss: {end - start:.6f} secondi")
-
-            start = time.perf_counter()
-            loss.backward()
-            end = time.perf_counter()
-            print(f"Tempo backward: {end - start:.6f} secondi")
+            if batch%100==0:
+                print("Batch "+str(batch)+"/"+str(int(df_validation.shape[0]/batch_size)))
             
-            start = time.perf_counter()
-            optimizer.step()
-            end = time.perf_counter()
-            print(f"Tempo step: {end - start:.6f} secondi")
-            # FINE DEBUG
-
-            """
-
-            optimizer.zero_grad(set_to_none=True) #parameter suggested by pytorch performance tuning guide
-            outputs = model(x)  # logits (sigmoid in forward opzionale quindi la applichiamo dopo)
-            loss = criterion(outputs, y)
-            loss.backward()
-            optimizer.step()
-
-            running_loss += loss.item() * x.size(0)
-            running_f1 += batch_f1(y, torch.sigmoid(outputs)) * x.size(0)
-            running_recall += batch_recall(y, torch.sigmoid(outputs)) * x.size(0)
+            x_val, y_val = x_val.to(device), y_val.to(device)
+            outputs_val = model(x_val)
+            loss_val = criterion(outputs_val, y_val)
+            val_loss += loss_val.item() * x_val.size(0)
+            val_f1 += batch_f1(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
+            val_recall += batch_recall(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
 
             #DEBUG: vanno sistemate le row_ids (che al momento non stanno venendo usate ma potrebbero)
-            row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y.size(0))]  # esempio row_id
-            y_true = pd.DataFrame(y.cpu().numpy(), columns=species_list)
-            y_true.insert(0, "row_id", row_ids)
+            row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y_val.size(0))]  # esempio row_id
+            y_val = pd.DataFrame(y_val.cpu().numpy(), columns=species_list)
+            y_val.insert(0, "row_id", row_ids)
 
-            y_pred_df = pd.DataFrame(torch.sigmoid(outputs).detach().cpu().numpy(), columns=species_list)
-            y_pred_df.insert(0, "row_id", row_ids)
-            
-            running_ROCAUC += birdCLEF_ROCAUC.score(solution=y_true, submission=y_pred_df, row_id_column_name="row_id") * x.size(0)
+            y_val_pred_df = pd.DataFrame(torch.sigmoid(outputs_val).detach().cpu().numpy(), columns=species_list)
+            y_val_pred_df.insert(0, "row_id", row_ids)
+
+            val_ROCAUC += birdCLEF_ROCAUC.score(y_val.copy(), y_val_pred_df.copy(), row_id_column_name="row_id") * x_val.size(0)
+
+            batch_per_class_val_ROCAUC, scored_columns = birdCLEF_ROCAUC.per_class_score(y_val.copy(), y_val_pred_df.copy(), row_id_column_name="row_id")
+
+            i = 0
+            for spec in scored_columns:
+                spec_count_list[spec_to_index_dict[spec]] += 1
+                per_class_val_ROCAUC[spec_to_index_dict[spec]] += batch_per_class_val_ROCAUC[i]
+                i += 1
+
             #FINE DEBUG
 
-            #end_batch = time.perf_counter()
-            #input(f"Total batch time: {end_batch - start_batch:.6f} secondi")
+    val_loss /= len(val_loader.dataset)
+    val_f1 /= len(val_loader.dataset)
+    val_ROCAUC /= len(val_loader.dataset)
+    val_recall /= len(val_loader.dataset)
+    per_class_val_ROCAUC /= spec_count_list
 
-        true_end = time.perf_counter()
-        print(f"Epoch running time: {(true_end - true_start)/60:.6f} minutes")
-            
+    print(f"Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}")
+    
+    print(f"Val recall: {val_recall:.4f}")
 
-        epoch_loss = running_loss / len(train_loader.dataset)
-        epoch_f1 = running_f1 / len(train_loader.dataset)
-        epoch_ROCAUC = running_ROCAUC / len(train_loader.dataset)
-        epoch_recall = running_recall / len(train_loader.dataset)
+    print(f"Val ROCAUC: {val_ROCAUC:.4f}")
 
-        # -------------------
-        # VALIDATION
-        # -------------------
-        model.eval()
-        val_loss = 0.0
-        val_f1 = 0.0
-        val_ROCAUC = 0.0
-        val_recall = 0.0
-        with torch.no_grad():
-            for x_val, y_val, _, _ in val_loader:
-                x_val, y_val = x_val.to(device), y_val.to(device)
-                outputs_val = model(x_val)
-                loss_val = criterion(outputs_val, y_val)
-                val_loss += loss_val.item() * x_val.size(0)
-                val_f1 += batch_f1(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
-                val_recall += batch_recall(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
-
-                #DEBUG: vanno sistemate le row_ids (che al momento non stanno venendo usate ma potrebbero)
-                row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y_val.size(0))]  # esempio row_id
-                y_val = pd.DataFrame(y_val.cpu().numpy(), columns=species_list)
-                y_val.insert(0, "row_id", row_ids)
-
-                y_val_pred_df = pd.DataFrame(torch.sigmoid(outputs_val).detach().cpu().numpy(), columns=species_list)
-                y_val_pred_df.insert(0, "row_id", row_ids)
-
-                val_ROCAUC += birdCLEF_ROCAUC.score(y_val, y_val_pred_df, row_id_column_name="row_id") * x_val.size(0)
-                #FINE DEBUG
-
-        val_loss /= len(val_loader.dataset)
-        val_f1 /= len(val_loader.dataset)
-        val_ROCAUC /= len(val_loader.dataset)
-        val_recall /= len(val_loader.dataset)
-
-        print(f"Epoch {epoch+1}/{num_epochs} "
-            f"- Train Loss: {epoch_loss:.4f}, Train F1: {epoch_f1:.4f} "
-            f"- Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}")
-        
-        print(f"Train recall: {epoch_recall:.4f} "
-            f"- Val recall: {val_recall:.4f}")
-
-        print(f"Train ROCAUC: {epoch_ROCAUC:.4f} "
-            f"- Val ROCAUC: {val_ROCAUC:.4f}")
-
-        list_train_loss[epoch] += epoch_loss
-        list_train_recall[epoch] += epoch_recall
-        list_train_rocauc[epoch] += epoch_ROCAUC
-        list_val_loss[epoch] += val_loss
-        list_val_recall[epoch] += val_recall
-        list_val_rocauc[epoch] += val_ROCAUC
-
-        with open(results_path+"/list_train_loss.json", "w") as a, open(results_path+"/list_train_recall.json", "w") as b, open(results_path+"/list_train_rocauc.json", "w") as c:
-            json.dump(list_train_loss, a)
-            json.dump(list_train_recall, b)
-            json.dump(list_train_rocauc, c)
-
-        with open(results_path+"/list_val_loss.json", "w") as d, open(results_path+"/list_val_recall.json", "w") as e, open(results_path+"/list_val_rocauc.json", "w") as f:
-            json.dump(list_val_loss, d)
-            json.dump(list_val_recall, e)
-            json.dump(list_val_rocauc, f)
-
-
-        # Save final model and training graphs
-        if os.path.exists(results_path+"/model_checkpoint.pth"):
-            os.remove(results_path+"/model_checkpoint.pth")
-            print("Deleted checkpoint")
-        else:
-            print("No previous checkpoint to be deleted")
-        
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "epoch": epoch,
-        }, results_path+"/model_checkpoint.pth")
-
-    plot_metric(list_train_loss, list_val_loss, "loss", results_path+"/train_vs_validation_loss.png")
-    plot_metric(list_train_recall, list_val_recall, "recall", results_path+"/train_vs_validation_recall.png")
-    plot_metric(list_train_rocauc, list_val_rocauc, "rocauc", results_path+"/train_vs_validation_rocauc.png")
+    print("Per class val ROCAUC:")
+    for spec in species_list:
+        print(str(spec)+": "+str(per_class_val_ROCAUC[spec_to_index_dict[spec]].round(4)))
 
 if __name__ == "__main__":
     torch.cuda.memory.set_per_process_memory_fraction(1.0)

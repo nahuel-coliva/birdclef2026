@@ -206,4 +206,9 @@ class StreamingPCENTransform(nn.Module):
         self.empty = False
         return x
 
+    def get_parameters(self):
+        return {"s": self.s,
+            "alpha": self.alpha,
+            "delta": self.delta,
+            "r": self.r}
     
