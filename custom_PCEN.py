@@ -88,7 +88,7 @@ class F2M(nn.Module):
         spec_m = F.linear(spec_f, self.fb.T)
         return spec_m
 
-@torch.compile(mode="reduce-overhead")
+#@torch.compile(mode="reduce-overhead")
 def compiled_M(x, s, T, device):
     s_x = x.mul(s)
     s_x[:,0,:] = x[:,0,:]
@@ -102,7 +102,7 @@ def compiled_M(x, s, T, device):
     M = torch.cumsum(M, dim=1) / powers
     return M
 
-@torch.compile(mode="reduce-overhead")
+#@torch.compile(mode="reduce-overhead")
 def pcen(x, eps=1E-6, s=0.025, alpha=0.98, delta=2, r=0.5, training=False, last_state=None, empty=True):
     """
     # OLD

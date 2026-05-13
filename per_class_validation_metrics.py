@@ -257,8 +257,10 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     print(f"Val ROCAUC: {val_ROCAUC:.4f}")
 
     print("Per class val ROCAUC:")
+    k = 0
     for spec in species_list:
-        print(str(spec)+": "+str(per_class_val_ROCAUC[spec_to_index_dict[spec]].round(4)))
+        print(str(k)+" "+str(spec)+": "+str(per_class_val_ROCAUC[spec_to_index_dict[spec]].round(4)))
+        k+=1
 
 if __name__ == "__main__":
     torch.cuda.memory.set_per_process_memory_fraction(1.0)

@@ -3,15 +3,16 @@ from sklearn.exceptions import UndefinedMetricWarning
 import json
 
 import pandas as pd
-import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from sklearn.metrics import f1_score, recall_score
-import birdCLEF_ROCAUC
 import matplotlib.pyplot as plt
 from pathlib import Path
 import custom_classes
+import custom_PCEN
+import matplotlib.pyplot as plt
+import librosa
 
 
 def batch_f1(y_true, y_pred, threshold=0.5):
@@ -52,6 +53,32 @@ def count_trainable_params(model):
 def count_total_params(model):
     return sum(p.numel() for p in model.parameters())
 
+def load_audio(path, sr, offset=0):
+    return librosa.core.load(path, sr=sr, duration=5, offset=offset)[0]
+
+def load_spectrogram(path, sr, n_mels, n_fft, hop_length, s, alpha, delta, offset):
+    transform = custom_PCEN.StreamingPCENTransform(n_mels=n_mels, n_fft=n_fft, hop_length=hop_length,
+                                        s=s, alpha=alpha, delta=delta
+                ).cuda()
+
+    x = torch.tensor(load_audio(path, sr, offset)).unsqueeze(0).cuda() #duration=5 : loads first 5 seconds
+
+    spectrogram = transform(x)
+
+    """
+    if i==1:
+        start = int(200/(hops[i]/sr*1000)) # taglio i primi hop in modo da partire da 200ms: ogni hop è hops/sr*1000 ms, nel nostro caso 256/32 ms; avrò bisogno di 200/(256/32) hops
+    else:
+        start=0
+    #print("Start: "+str(start))
+    spectrogram = y[0].cpu().numpy().T[:,start:]
+    
+    # Normalizzazione
+    spec_no_streaming.append((spectrogram - spectrogram.mean(axis=1, keepdims=True)) / (spectrogram.std(axis=1, keepdims=True) + 1e-6))
+    """
+    spectrogram = (spectrogram - spectrogram.mean(axis=1, keepdims=True)) / (spectrogram.std(axis=1, keepdims=True) + 1e-6)
+    
+    return spectrogram[0].cpu().numpy().T
 
 #
 # Keep the same validation code as the main loop, add per-class metrics
@@ -78,7 +105,6 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     num_classes = len(species_list_train)
     print("Train number of classes: "+str(num_classes))
     species_list.extend(species_list_train)
-    #print(str(sorted(species_list)))
 
     # Validation
     df_validation = pd.read_csv("./data/validation_soundscapes_labels.csv").drop_duplicates()
@@ -99,9 +125,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     num_classes = len(species_list)
     print("Total number of classes: "+str(num_classes))
 
-    # Nel training manca(va)no '47158son02', '47158son14' mentre '43435' ha(veva) un solo record
-    #input("Partiamo?")
-
+    """
     #DATASET CREATION
     # Train
     train_dataset = custom_classes.SoundscapeDataset(
@@ -120,7 +144,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     )
 
     print("Dataset objects ready")
-
+    """
     # TRAIN LOOP: setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -132,6 +156,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     
     except Exception as e:
         print(e)
+        """
         print("Computing weights")
         # pos_weights to correct imbalanced dataset
         pos_weights = torch.zeros(num_classes, device=device)
@@ -144,8 +169,6 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         total_samples = len(train_dataset.samples)
         for i in range(len(pos_weights)):
             pos_weights[i] += 1e-6
-            # Previously: pos_weights[i] = min(int((total_samples-pos_weights[i])/pos_weights[i]), 50)
-            # pos_weights[i] = max(min(int(total_samples/(pos_weights[i]*len(pos_weights))), 1000), 1)
             pos_weights[i] = min(total_samples/(pos_weights[i]*len(pos_weights)), 100)
 
         for i in range(len(pos_weights)):
@@ -154,17 +177,8 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         pos_weights_serial = pos_weights.tolist()
         with open(results_path+"/pos_weights.json", "w") as a:
             json.dump(pos_weights_serial, a)
+        """
 
-    """print("Count")
-    print(str(pos_weights))
-
-    print("Weigths")
-    print(str(pos_weights))
-    print(min(pos_weights))
-    print(max(pos_weights))"""
-
-
-    batch_size=128
 
     model = custom_classes.BirdModel(num_classes=num_classes,
                     sample_rate=sample_rate,
@@ -174,13 +188,6 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
                     trainable_pcen=True
                 ).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
-    model.compile(mode="reduce-overhead")
-    print("Model compiled")
-
-    input(model.get_pcen_parameters())
-
-    # dataset: train_dataset e val_dataset già istanziati
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=True, pin_memory=True)
 
     # TRAIN LOOP: execution
     try:
@@ -197,68 +204,54 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         print(e)
         print("No previous run detected: setting up a new one")
 
-    # -------------------
-    # VALIDATION
-    # -------------------
     model.eval()
-    val_loss = 0.0
-    val_f1 = 0.0
-    val_ROCAUC = 0.0
-    val_recall = 0.0
-    per_class_val_ROCAUC = np.zeros(len(species_list))
-    spec_to_index_dict = {
-        species_list[i]:i for i in range(len(species_list))
-    }
-    spec_count_list = np.zeros(len(species_list))
-    with torch.no_grad():
-        batch = 0
-        for x_val, y_val, _, _ in val_loader:
-            batch += 1
-            if batch%100==0:
-                print("Batch "+str(batch)+"/"+str(int(df_validation.shape[0]/batch_size)))
-            
-            x_val, y_val = x_val.to(device), y_val.to(device)
-            outputs_val = model(x_val)
-            loss_val = criterion(outputs_val, y_val)
-            val_loss += loss_val.item() * x_val.size(0)
-            val_f1 += batch_f1(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
-            val_recall += batch_recall(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
+    target_layer = model.backbone.features[-1]
 
-            #DEBUG: vanno sistemate le row_ids (che al momento non stanno venendo usate ma potrebbero)
-            row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y_val.size(0))]  # esempio row_id
-            y_val = pd.DataFrame(y_val.cpu().numpy(), columns=species_list)
-            y_val.insert(0, "row_id", row_ids)
-
-            y_val_pred_df = pd.DataFrame(torch.sigmoid(outputs_val).detach().cpu().numpy(), columns=species_list)
-            y_val_pred_df.insert(0, "row_id", row_ids)
-
-            val_ROCAUC += birdCLEF_ROCAUC.score(y_val.copy(), y_val_pred_df.copy(), row_id_column_name="row_id") * x_val.size(0)
-
-            batch_per_class_val_ROCAUC, scored_columns = birdCLEF_ROCAUC.per_class_score(y_val.copy(), y_val_pred_df.copy(), row_id_column_name="row_id")
-
-            i = 0
-            for spec in scored_columns:
-                spec_count_list[spec_to_index_dict[spec]] += 1
-                per_class_val_ROCAUC[spec_to_index_dict[spec]] += batch_per_class_val_ROCAUC[i]
-                i += 1
-
-            #FINE DEBUG
-
-    val_loss /= len(val_loader.dataset)
-    val_f1 /= len(val_loader.dataset)
-    val_ROCAUC /= len(val_loader.dataset)
-    val_recall /= len(val_loader.dataset)
-    per_class_val_ROCAUC /= spec_count_list
-
-    print(f"Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}")
+    # -------------------
+    # EXPLAINABILITY
+    # -------------------
+    #path = r".\data\synthetic_validation_soundscapes\BC2026_Train_0006_S09_00_BC2026_Train_0006_S09_00_BC2026_Train_0006_S09_45_23154.ogg"
+    path = r".\data\train_audio\22967\iNat911059.ogg" # 9 ma argmax 207
+    path = r".\data\train_audio\strowl1\iNat16636.ogg"# 207 ma argmax 67
+    sr=32000
+    hop_length = 320
+    n_fft = 320*4
+    n_mels = 200
+    s = 0.05
+    alpha = 0.9
+    delta = 2
+    offset=10
+    spectrogram = load_spectrogram(path=path, sr=sr, n_mels=n_mels, n_fft=n_fft, hop_length=hop_length, s=s, alpha=alpha, delta=delta, offset=offset) # [1,H,W]
     
-    print(f"Val recall: {val_recall:.4f}")
+    gradcam = custom_classes.GradCAM(model, target_layer)
 
-    print(f"Val ROCAUC: {val_ROCAUC:.4f}")
+    cam = gradcam(torch.Tensor(load_audio(path, sr, offset=offset)).float().to(device).unsqueeze(0))  # [1,1,H,W]
+    
+    # resize alla dimensione input
+    cam = F.interpolate(cam, size=spectrogram.shape, mode='bilinear', align_corners=False)
 
-    print("Per class val ROCAUC:")
-    for spec in species_list:
-        print(str(spec)+": "+str(per_class_val_ROCAUC[spec_to_index_dict[spec]].round(4)))
+    # normalizzazione
+    cam = cam - cam.min()
+    cam = cam / (cam.max() + 1e-8)
+
+    cam = cam.squeeze().cpu().detach().numpy()
+
+
+    # PRINT
+    highlighted = spectrogram * cam
+    vmin = min(x.min() for x in [spectrogram, highlighted])
+    vmax = max(x.max() for x in [spectrogram, highlighted])
+
+    fig, axes = plt.subplots(1, 2, figsize=(10,4))
+
+    im0 = axes[0].imshow(spectrogram, aspect='auto', origin='lower', vmin=vmin, vmax=vmax, cmap="jet")
+    im1 = axes[1].imshow(highlighted, aspect='auto', origin='lower', vmin=vmin, vmax=vmax, cmap="jet")
+
+    fig.subplots_adjust(right=0.88)
+
+    cax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
+    fig.colorbar(im1, cax=cax)
+    plt.show()
 
 if __name__ == "__main__":
     torch.cuda.memory.set_per_process_memory_fraction(1.0)

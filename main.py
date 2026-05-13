@@ -121,31 +121,38 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     # TRAIN LOOP: setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # pos_weights to correct imbalanced dataset
-    pos_weights = torch.zeros(num_classes, device=device)
+    try:
+        with open(results_path+"/pos_weights.json", "r") as a:
+            pos_weights_serial = json.load(a)
+        pos_weights = torch.Tensor(pos_weights_serial)
+        print("Loaded weights from "+results_path+"/pos_weights.json")
+    
+    except Exception as e:
+        print(e)
+        print("Computing weights")
+        # pos_weights to correct imbalanced dataset
+        pos_weights = torch.zeros(num_classes, device=device)
 
-    for _, _, labels in train_dataset.samples:
-        for label in labels:
-            if label in species_to_idx:
-                pos_weights[species_to_idx[label]] += 1
+        for _, _, labels in train_dataset.samples:
+            for label in labels:
+                if label in species_to_idx:
+                    pos_weights[species_to_idx[label]] += 1
 
-    print("Count")
-    print(str(pos_weights))
+        total_samples = len(train_dataset.samples)
+        for i in range(len(pos_weights)):
+            pos_weights[i] += 1e-6
+            pos_weights[i] = min(total_samples/(pos_weights[i]*len(pos_weights)), 100)
 
-    total_samples = len(train_dataset.samples)
-    for i in range(len(pos_weights)):
-        pos_weights[i] += 1e-6
-        # Previously: pos_weights[i] = min(int((total_samples-pos_weights[i])/pos_weights[i]), 50)
-        # pos_weights[i] = max(min(int(total_samples/(pos_weights[i]*len(pos_weights))), 1000), 1)
-        pos_weights[i] = min(total_samples/(pos_weights[i]*len(pos_weights)), 100)
+        for i in range(len(pos_weights)):
+            pos_weights[i] /= min(pos_weights)
 
-    for i in range(len(pos_weights)):
-        pos_weights[i] /= min(pos_weights)
+        pos_weights_serial = pos_weights.tolist()
+        with open(results_path+"/pos_weights.json", "w") as a:
+            json.dump(pos_weights_serial, a)
 
     print("Weigths")
     print(str(pos_weights))
-    print(min(pos_weights))
-    print(max(pos_weights))
+    print("Min: "+str(min(pos_weights))+", Max: "+str(max(pos_weights)))
 
     
     train_workers = 2
@@ -165,7 +172,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         {"params": model.frontend.pcen.parameters(), "lr": lr/10}
     ])
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
-    model.compile(mode="reduce-overhead")
+    model.compile(mode="reduce-overhead", fullgraph=True) # Tried adding fullgraph=True for performance improvements
     print("Model compiled")
 
     # Model complexity vs dataset size

@@ -1,9 +1,11 @@
 import os
 import torch
-import librosa
-from torch.utils.data import Dataset
-from collections import OrderedDict
 import torch.nn as nn
+from torch.utils.data import Dataset
+import torch.nn.functional as F
+import librosa
+from collections import OrderedDict
+
 import custom_PCEN
 from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
 import matplotlib.pyplot as plt
@@ -145,6 +147,9 @@ class PCENFrontend(nn.Module):
 
         return torch.nn.functional.layer_norm(pcen, (pcen.shape[-1],), eps=1e-6)
     
+    def get_pcen_parameters(self):
+        return self.pcen.get_parameters()
+    
 
 @torch.compile(mode="reduce-overhead")
 def change_dimensions(x):
@@ -265,4 +270,44 @@ class BirdModel(nn.Module):
         plt.colorbar(img, ax=axes, label="PCEN value")
         plt.tight_layout()
         plt.savefig(str("spectrogram_at_epoch_"+str(self.epoch)))
+
+    def get_pcen_parameters(self):
+        return self.frontend.get_pcen_parameters()
     #FINE DEBUG
+
+
+class GradCAM:
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+
+        self.activations = None
+        self.gradients = None
+
+        target_layer.register_forward_hook(self.save_activation)
+        target_layer.register_backward_hook(self.save_gradient)
+
+    def save_activation(self, module, input, output):
+        self.activations = output
+
+    def save_gradient(self, module, grad_input, grad_output):
+        self.gradients = grad_output[0]
+
+    def __call__(self, x, class_idx=None):
+        output = self.model(x)
+
+        if class_idx is None:
+            class_idx = output.argmax(dim=1)
+
+        print("Looking at: "+str(class_idx))
+        loss = output[:, class_idx]
+        self.model.zero_grad()
+        loss.backward(torch.ones_like(loss))
+
+        # pesi = media dei gradienti
+        weights = self.gradients.mean(dim=(2, 3), keepdim=True)
+
+        cam = (weights * self.activations).sum(dim=1, keepdim=True)
+        cam = F.relu(cam)
+
+        return cam
