@@ -93,7 +93,7 @@ def compiled_M(x, s, T, device):
     s_x = x.mul(s)
     s_x[:,0,:] = x[:,0,:]
 
-    powers = (1 - s) ** -torch.arange(T, device=device)  # [T]
+    powers = (1 - s) ** -torch.arange(T, device=device, dtype=x.dtype)  # [T]
     
     # reshape per broadcasting: [1, T, 1]
     powers = powers.view(1, T, 1)
@@ -196,12 +196,35 @@ class StreamingPCENTransform(nn.Module):
         # 2) stft without a specified window uses the rectangle window: best suited for periodic signals, it introduces heavy spectral leakage otherwise
         #    therefore, we change to Hanning window
         window = self.window.to(device=x.device, dtype=x.dtype)
+
+        #print("input", x.dtype)
+
         x = torch.stft(x, self.n_fft, **self.stft_kwargs, window=window, return_complex=True).abs()
+
+        #print("after stft", x.dtype)
+
         x = self.f2m(x.permute(0, 2, 1))
-        if self.use_cuda_kernel:
-            x, ls = pcen(x, self.eps, self.s, self.alpha, self.delta, self.r, self.trainable, self.last_state, self.empty) #pcen_cuda_kernel
+
+        #print("after f2m", x.dtype)
+
+        if self.trainable:
+            s = self.s.to(dtype=x.dtype)
+            alpha = self.alpha.to(dtype=x.dtype)
+            delta = self.delta.to(dtype=x.dtype)
+            r = self.r.to(dtype=x.dtype)
         else:
-            x, ls = pcen(x, self.eps, self.s, self.alpha, self.delta, self.r, self.training and self.trainable, self.last_state, self.empty)
+            s = self.s
+            alpha = self.alpha
+            delta = self.delta
+            r = self.r
+
+        if self.use_cuda_kernel:
+            x, ls = pcen(x, self.eps, s, alpha, delta, r, self.trainable, self.last_state, self.empty) #pcen_cuda_kernel
+
+            #input("after pcen "+str(x.dtype))
+
+        else:
+            x, ls = pcen(x, self.eps, s, alpha, delta, r, self.training and self.trainable, self.last_state, self.empty)
         self.last_state = ls.detach()
         self.empty = False
         return x

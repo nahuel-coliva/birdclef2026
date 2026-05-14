@@ -172,8 +172,10 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         {"params": model.frontend.pcen.parameters(), "lr": lr/10}
     ])
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
-    model.compile(mode="reduce-overhead", fullgraph=True) # Tried adding fullgraph=True for performance improvements
+    #model.compile(mode="reduce-overhead", fullgraph=True) # Tried adding fullgraph=True for performance improvements
     print("Model compiled")
+    use_bf16 = device == "cuda" and torch.cuda.is_bf16_supported()
+    print(f"Mixed precision: {'bfloat16' if use_bf16 else 'disabled (float32)'}")
 
     # Model complexity vs dataset size
     trainable = count_trainable_params(model)
@@ -255,7 +257,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         for x, y, _, _ in train_loader:
             #start_batch = time.perf_counter()
             batch += 1
-            if batch%5000==0:
+            if batch%10==0:
                 print("Batch "+str(batch)+"/"+str(int(total_batches/batch_size)))
             x, y = x.to(device), y.to(device)
 
@@ -290,21 +292,23 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
             """
 
             optimizer.zero_grad(set_to_none=True) #parameter suggested by pytorch performance tuning guide
-            outputs = model(x)  # logits (sigmoid in forward opzionale quindi la applichiamo dopo)
-            loss = criterion(outputs, y)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+                outputs = model(x)  # logits (sigmoid in forward opzionale quindi la applichiamo dopo)
+                loss = criterion(outputs, y)
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item() * x.size(0)
-            running_f1 += batch_f1(y, torch.sigmoid(outputs)) * x.size(0)
-            running_recall += batch_recall(y, torch.sigmoid(outputs)) * x.size(0)
+            probs = torch.sigmoid(outputs.float())
+            running_f1 += batch_f1(y, probs) * x.size(0)
+            running_recall += batch_recall(y, probs) * x.size(0)
 
             #DEBUG: vanno sistemate le row_ids (che al momento non stanno venendo usate ma potrebbero)
             row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y.size(0))]  # esempio row_id
             y_true = pd.DataFrame(y.cpu().numpy(), columns=species_list)
             y_true.insert(0, "row_id", row_ids)
 
-            y_pred_df = pd.DataFrame(torch.sigmoid(outputs).detach().cpu().numpy(), columns=species_list)
+            y_pred_df = pd.DataFrame(probs.detach().cpu().numpy(), columns=species_list)
             y_pred_df.insert(0, "row_id", row_ids)
             
             running_ROCAUC += birdCLEF_ROCAUC.score(solution=y_true, submission=y_pred_df, row_id_column_name="row_id") * x.size(0)
@@ -333,18 +337,20 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         with torch.no_grad():
             for x_val, y_val, _, _ in val_loader:
                 x_val, y_val = x_val.to(device), y_val.to(device)
-                outputs_val = model(x_val)
-                loss_val = criterion(outputs_val, y_val)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+                    outputs_val = model(x_val)
+                    loss_val = criterion(outputs_val, y_val)
                 val_loss += loss_val.item() * x_val.size(0)
-                val_f1 += batch_f1(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
-                val_recall += batch_recall(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
+                probs_val = torch.sigmoid(outputs_val.float())
+                val_f1 += batch_f1(y_val, probs_val) * x_val.size(0)
+                val_recall += batch_recall(y_val, probs_val) * x_val.size(0)
 
                 #DEBUG: vanno sistemate le row_ids (che al momento non stanno venendo usate ma potrebbero)
                 row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y_val.size(0))]  # esempio row_id
                 y_val = pd.DataFrame(y_val.cpu().numpy(), columns=species_list)
                 y_val.insert(0, "row_id", row_ids)
 
-                y_val_pred_df = pd.DataFrame(torch.sigmoid(outputs_val).detach().cpu().numpy(), columns=species_list)
+                y_val_pred_df = pd.DataFrame(probs_val.detach().cpu().numpy(), columns=species_list)
                 y_val_pred_df.insert(0, "row_id", row_ids)
 
                 val_ROCAUC += birdCLEF_ROCAUC.score(y_val, y_val_pred_df, row_id_column_name="row_id") * x_val.size(0)
@@ -407,7 +413,7 @@ if __name__ == "__main__":
     hops = [320]
     n_fft = [320*4] #il default presente in documentazione è n_hops = floor(n_fft / 4)
     n_mels = [200]
-    session_ID = "1_point_5M_dataset_3_channels"
+    session_ID = "performance_test"
 
     num_epochs = 30
 
