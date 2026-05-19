@@ -273,9 +273,6 @@ if __name__ == "__main__":
 
     num_epochs = 30
 
-    # Enables automatic kernel selection for performance: does not seem to improve performances
-    #torch.backends.cudnn.benchmark = True
-
     for i in range(len(hops)):
         for j in range(len(n_mels)):
             results_path = "./results/session_"+str(session_ID)+"/"+str(hops[i])+"_"+str(n_mels[j])

@@ -165,7 +165,8 @@ class BirdModel(nn.Module):
                 n_mels=128,
                 trainable_pcen=True,
                 #DEBUG
-                epoch=0
+                epoch=0,
+                last_layer_flag=True #set to False to analyze extracted features
                 #FINE DEBUG
     ):
         super().__init__()
@@ -211,10 +212,11 @@ class BirdModel(nn.Module):
         """
 
         # testa di classificazione
-        in_features = self.backbone.classifier[1].in_features
-        self.backbone.classifier = nn.Sequential(
-            nn.Linear(in_features, num_classes)
-        )
+        if last_layer_flag:
+            in_features = self.backbone.classifier[1].in_features
+            self.backbone.classifier = nn.Sequential(
+                nn.Linear(in_features, num_classes)
+            )
 
     def forward(self, x):
         """
