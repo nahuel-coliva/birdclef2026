@@ -5,6 +5,7 @@ results/
 other/
 *.wav
 *.png
+*.csv
 test.py
 
 # Byte-compiled / optimized / DLL files

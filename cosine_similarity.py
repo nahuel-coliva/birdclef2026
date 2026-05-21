@@ -26,7 +26,7 @@ def lambda_function(x, item):
     return item in x
   return safe_isnan(item) and safe_isnan(x)
 
-def heatmap(path):
+def heatmap(path, param_dict, summary_path):
     # Carica dizionario
     with open(path, "r") as f:
         d = json.load(f)
@@ -35,13 +35,20 @@ def heatmap(path):
     labels_length = len(labels)
 
     intra = np.array([d[c][c] for c in labels]).mean()
+    elements = []
     for r in range(labels_length-1):
         for c in range(r+1,labels_length):
-            elements = [d[labels[r]][labels[c]]]
+            elements.append(d[labels[r]][labels[c]])
+
     inter = np.array(elements).mean()
     print("Intra: "+str(intra))
     print("Inter: "+str(inter))
 
+    with open(summary_path+"/summary.txt", "a") as file1:
+        file1.write(str(param_dict)+"\n")
+        file1.write("Intra: "+str(intra)+"\nInter: "+str(inter)+"\n")
+
+    """
     # Matrice simmetrica
     mat = np.array([[d[r][c] for c in labels] for r in labels])
 
@@ -63,64 +70,97 @@ def heatmap(path):
     fig.colorbar(im, ax=ax)
 
     plt.tight_layout()
-    #plt.show()
+    plt.show()
+    """
 
-def mean_cosine_similarity(species_1, species_2, embeddings):
-    sim = 0
+def tensor_mean_cosine_similarity(species_1, species_2, embeddings_by_species, device):
     if species_1==species_2:
-        a_set = list(embeddings[species_1].keys())
+        a_set = list(embeddings_by_species[species_1].keys())
         elements = len(a_set)
         magnitude = elements*(elements-1)/2
         
-        for a in range(elements-1):
-            for b in range(a+1,elements):
-                sim += cosine_similarity(embeddings[species_1][a_set[a]], embeddings[species_2][a_set[b]], dim=0)
-
-    else:
-        a_set = set(embeddings[species_1].keys()).difference(embeddings[species_2].keys())
-        b_set = set(embeddings[species_2].keys()).difference(embeddings[species_1].keys())
-        magnitude = len(a_set)*len(b_set)
-    
-        for a in a_set:
-            for b in b_set:
-                sim += cosine_similarity(embeddings[species_1][a], embeddings[species_2][b], dim=0)
-    
-    if magnitude == 0:
-        return 0
-    return float(sim/magnitude)
-
-def tensor_mean_cosine_similarity(species_1, species_2, embeddings, device):
-    if species_1==species_2:
-        a_set = list(embeddings[species_1].keys())
-        elements = len(a_set)
-        magnitude = elements*(elements-1)/2
-
         if magnitude == 0:
             return 0
         
-        embeddings_a = embeddings[species_1][a_set[0]].repeat(elements-1, 1)
-        embeddings_b = torch.Tensor().to(device)
-        embeddings_b_work_tensor = torch.cat([embeddings[species_2][a].unsqueeze(0) for a in a_set], 0)
+        embeddings_by_species_a = embeddings_by_species[species_1][a_set[0]].repeat(elements-1, 1)
+        embeddings_by_species_b = torch.Tensor().to(device)
+        embeddings_by_species_b_work_tensor = torch.cat([embeddings_by_species[species_2][a].unsqueeze(0) for a in a_set], 0)
         for a in range(1, elements-1):
-            embeddings_a = torch.cat([embeddings_a, embeddings[species_1][a_set[a]].repeat(elements-1-a, 1)], 0)
+            embeddings_by_species_a = torch.cat([embeddings_by_species_a, embeddings_by_species[species_1][a_set[a]].repeat(elements-1-a, 1)], 0)
 
         for b in range(1,elements):
-            embeddings_b = torch.cat([embeddings_b, embeddings_b_work_tensor[b:]], 0)
+            embeddings_by_species_b = torch.cat([embeddings_by_species_b, embeddings_by_species_b_work_tensor[b:]], 0)
 
     else:
-        a_set = set(embeddings[species_1].keys()).difference(embeddings[species_2].keys())
-        b_set = set(embeddings[species_2].keys()).difference(embeddings[species_1].keys())
+        a_set = set(embeddings_by_species[species_1].keys()).difference(embeddings_by_species[species_2].keys())
+        b_set = set(embeddings_by_species[species_2].keys()).difference(embeddings_by_species[species_1].keys())
         magnitude = len(a_set)*len(b_set)
 
         if magnitude == 0:
             return 0
 
-        embeddings_a = torch.cat([embeddings[species_1][a].unsqueeze(0) for a in a_set], 0).repeat(len(b_set), 1)
-        embeddings_b = torch.cat([embeddings[species_2][b].unsqueeze(0) for b in b_set], 0).repeat(len(a_set), 1)
+        embeddings_by_species_a = torch.cat([embeddings_by_species[species_1][a].unsqueeze(0) for a in a_set], 0).repeat(len(b_set), 1)
+        embeddings_by_species_b = torch.cat([embeddings_by_species[species_2][b].unsqueeze(0) for b in b_set], 0).repeat(len(a_set), 1)
     
-    sim = cosine_similarity(embeddings_a, embeddings_b, dim=1).mean()
+    sim = cosine_similarity(embeddings_by_species_a, embeddings_by_species_b, dim=1).mean()
     
     return float(sim)
+
+def knn_label_consistency(embeddings, k=10):
+    # Rank top k nearest neighbours (by cosine similarity), return % of neighbours sharing at least one label
+    a_list = list(embeddings.keys())
+    elements = len(a_list)
+
+    working_embeddings_tensor_unique = torch.cat([item["data"].unsqueeze(0) for _, item in embeddings.items()], 0)
+
+    embeddings_tensor_repeated = torch.cat([embeddings[el]["data"].repeat(elements-1, 1) for el in a_list], 0)
+    embeddings_tensor_unique = torch.cat([torch.cat([working_embeddings_tensor_unique[:i, :], working_embeddings_tensor_unique[i+1:, :]], 0) for i in range(elements)], 0)
+    
+    sim = cosine_similarity(embeddings_tensor_repeated, embeddings_tensor_unique, dim=1)
+
+    for i in range(elements):
+        sim_i = sim[i*(elements-1):(i+1)*(elements-1)]
+        least = [0, sim_i[0]] # list [index, cos_sim(a_list[i], a_list[index])] just for the least cos_sim found in the top k
+        top_k_indexes = {}
+        for j in range(k):
+            top_k_indexes[j] = sim_i[j] # dictionary with (key, item) = (index, cos_sim(a_list[i], a_list[index]))
+            if least[1]>sim_i[j]:
+                least[0] = j
+                least[1] = sim_i[j]
+        try:
+            for j in range(k+1,elements-1):
+                if least[1]<sim_i[j]:
+                    top_k_indexes.pop(least[0])
+                    top_k_indexes[j] = sim_i[j]
+                    least[1] = 100
+                    for index in top_k_indexes:
+                        if least[1]>sim_i[index]:
+                            least[0] = index
+                            least[1] = sim_i[index]
+        except Exception as e:
+            print(e)
+            print("sim_i.shape: ", sim_i.shape)
+            print("top_k_indexes:", top_k_indexes)
+            print("least: ", least)
+            input()
+        
+        # Adjust indeces back to file names
+        top_k_filenames = {}
+        for index in top_k_indexes:
+            if index<=i:
+                top_k_filenames[a_list[index+1]] = top_k_indexes[index]
+            else:
+                top_k_filenames[a_list[index]] = top_k_indexes[index]
+
+        knn_metric = 0
+        for name in top_k_filenames.keys():
+            if not set(embeddings[a_list[i]]["labels"]).difference(set(embeddings[name]["labels"])):
+                knn_metric += 1
+        knn_metric /= k
+
+        embeddings[a_list[i]]["knn_metric"] = knn_metric
+
+    return embeddings
 
 
 #
@@ -140,18 +180,17 @@ def experimental_campaign(results_path, model_path, sample_rate, hop_length, n_f
     df_validation["end"] = pd.to_timedelta(df_validation["end"]).dt.total_seconds()
     df_validation["primary_label"] = df_validation["primary_label"].str.split(";")
 
-    el_per_class = 10
+    el_per_class = 5
     new_df = pd.DataFrame()
-    embeddings = {}
+    embeddings_by_species = {}
     for item in df_validation["primary_label"].explode().unique():
         item_rows = df_validation[df_validation["primary_label"].apply(lambda x: lambda_function(x, item))]
         new_df = pd.concat([new_df, item_rows.iloc[:el_per_class]])
-        embeddings["silence" if safe_isnan(item) else item] = {}
+        embeddings_by_species["silence" if safe_isnan(item) else item] = {}
     
     df_validation = new_df
     num_classes = len(df_validation["primary_label"].explode().unique())
     print("Validation number of classes: "+str(num_classes))
-
 
     # TRAIN LOOP: setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -193,11 +232,12 @@ def experimental_campaign(results_path, model_path, sample_rate, hop_length, n_f
     # VALIDATION
     # -------------------
     model.eval()
+    embeddings = {}
     with torch.no_grad():
         batch = 0
         for _, item in df_validation.iterrows():
             batch += 1
-            if batch%500==0:
+            if batch%1000==0:
                 print("Batch "+str(batch)+"/"+str(int(df_validation.shape[0])))
             
             if item["filename"].count("BC2026")>1:
@@ -214,18 +254,25 @@ def experimental_campaign(results_path, model_path, sample_rate, hop_length, n_f
                 label_list = item["primary_label"]
             else:
                 label_list = ["silence" if np.isnan(item["primary_label"]) else item["primary_label"]]
-
+            
+            data = model(x_val).squeeze()
+            embedding_name = item["filename"]+"_"+str(start)
             for label in label_list:
-                embeddings[label][item["filename"]+"_"+str(start)] = model(x_val).squeeze()
-    
-    
-    
-    species_list = list(embeddings.keys())
+                embeddings_by_species[label][embedding_name] = data
+            embeddings[embedding_name] = {"data": data, "labels": label_list}
+
+    species_list = list(embeddings_by_species.keys())
     species_list_length = len(species_list)
 
     cosine_similarity = {}
     for species in species_list:
         cosine_similarity[species] = {}
+
+
+    embeddings = knn_label_consistency(embeddings, 2)
+    for key, item in embeddings.items():
+        print(key)
+        input(item)
 
     avanzamento = 0
     start = time.perf_counter()
@@ -234,14 +281,11 @@ def experimental_campaign(results_path, model_path, sample_rate, hop_length, n_f
     for i in range(species_list_length):
         species_1 = species_list[i]
         avanzamento += 1
-        if avanzamento%10==0:
+        if avanzamento%50==0:
             print("Specie "+str(avanzamento)+"/"+str(species_list_length))
         for j in range(i,species_list_length):
             species_2 = species_list[j]
-            
-            #cosine_similarity[species_1][species_2] = mean_cosine_similarity(species_1, species_2, embeddings)
-            cosine_similarity[species_1][species_2] = tensor_mean_cosine_similarity(species_1, species_2, embeddings, device)
-
+            cosine_similarity[species_1][species_2] = tensor_mean_cosine_similarity(species_1, species_2, embeddings_by_species, device)
             cosine_similarity[species_2][species_1] = cosine_similarity[species_1][species_2]
     
     end = time.perf_counter()
@@ -256,7 +300,12 @@ def experimental_campaign(results_path, model_path, sample_rate, hop_length, n_f
     #
     # VISUALIZZAZIONE
     #
-    heatmap(cosine_similarity_path)
+    param_dict = {
+        "hops": hop_length
+        , "n_fft": n_fft
+        , "n_mels": n_mels
+    }
+    heatmap(cosine_similarity_path, param_dict, model_path)
 
 
 if __name__ == "__main__":
@@ -264,15 +313,15 @@ if __name__ == "__main__":
     
     mode = "_"
     while mode not in ["ciclo", "ondemand"]:
-        mode = input("ciclo o ondemand? ")
+        mode = "ciclo"#input("ciclo o ondemand? ")
 
     sample_rate = 32000
     
     if mode=="ciclo":
-        hops = [160, 313]
-        n_fft = [1280, 3072] #il default presente in documentazione è n_hops = floor(n_fft / 4)
-        n_mels = [128, 256]
-        session_ID = "performance_test"
+        hops = [120, 160, 320]
+        n_fft = [640, 1280, 3072] #il default presente in documentazione è n_hops = floor(n_fft / 4)
+        n_mels = [128, 200, 256]
+        session_ID = "performance_test_02"
 
     elif mode=="ondemand":
         hops = [int(input("Hops: "))]
@@ -282,8 +331,10 @@ if __name__ == "__main__":
     
 
     for i in range(len(hops)):
-        for j in range(len(n_mels)):
-            results_path = "./results/session_"+str(session_ID)+"/"+str(hops[i])+"_"+str(n_mels[j])
-            model_path = "./results/session_"+str(session_ID)
-            Path(results_path).mkdir(parents=True, exist_ok=True)
-            experimental_campaign(results_path, model_path, sample_rate, hops[i], n_fft[i], n_mels[j])
+        for j in range(len(n_fft)):
+            for k in range(len(n_mels)):
+                results_path = "./results/session_"+str(session_ID)+"/"+str(hops[i])+"_"+str(n_mels[k])
+                model_path = "./results/session_"+str(session_ID)
+                Path(results_path).mkdir(parents=True, exist_ok=True)
+                print("Parameters: hops "+str(hops[i])+" - n_fft "+str(n_fft[j])+" - mels "+str(n_mels[k]))
+                experimental_campaign(results_path, model_path, sample_rate, hops[i], n_fft[j], n_mels[k])

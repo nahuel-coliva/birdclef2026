@@ -93,6 +93,7 @@ def compiled_M(x, s, T, device):
     s_x = x.mul(s)
     s_x[:,0,:] = x[:,0,:]
 
+    # IMPORTANT! When x becomes too long (more than 2000) powers becomes inf, leading to nan values, thus errors
     powers = (1 - s) ** -torch.arange(T, device=device, dtype=x.dtype)  # [T]
     
     # reshape per broadcasting: [1, T, 1]
