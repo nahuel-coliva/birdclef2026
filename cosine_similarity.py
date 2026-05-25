@@ -113,12 +113,27 @@ def knn_label_consistency(embeddings, k=10):
 
     working_embeddings_tensor_unique = torch.cat([item["data"].unsqueeze(0) for _, item in embeddings.items()], 0)
 
+    """
+    # Old version: too much memory required, switching to for-cycle
     embeddings_tensor_repeated = torch.cat([embeddings[el]["data"].repeat(elements-1, 1) for el in a_list], 0)
     embeddings_tensor_unique = torch.cat([torch.cat([working_embeddings_tensor_unique[:i, :], working_embeddings_tensor_unique[i+1:, :]], 0) for i in range(elements)], 0)
     
     sim = cosine_similarity(embeddings_tensor_repeated, embeddings_tensor_unique, dim=1)
+    """
 
+    sim = torch.Tensor().to("cuda")
+    print("Computing similarities...")
     for i in range(elements):
+        if i%500==0:
+            print("Embedding "+str(i)+"/"+str(elements))
+        embeddings_tensor_repeated = embeddings[a_list[i]]["data"].repeat(elements-1, 1)
+        embeddings_tensor_unique = torch.cat([working_embeddings_tensor_unique[:i, :], working_embeddings_tensor_unique[i+1:, :]], 0)
+        sim = torch.cat([sim, cosine_similarity(embeddings_tensor_repeated, embeddings_tensor_unique, dim=1)], 0)
+
+    print("Computing knn...")
+    for i in range(elements):
+        if i%500==0:
+            print("Embedding "+str(i)+"/"+str(elements))
         sim_i = sim[i*(elements-1):(i+1)*(elements-1)]
         least = [0, sim_i[0]] # list [index, cos_sim(a_list[i], a_list[index])] just for the least cos_sim found in the top k
         top_k_indexes = {}
@@ -180,7 +195,7 @@ def experimental_campaign(results_path, model_path, sample_rate, hop_length, n_f
     df_validation["end"] = pd.to_timedelta(df_validation["end"]).dt.total_seconds()
     df_validation["primary_label"] = df_validation["primary_label"].str.split(";")
 
-    el_per_class = 5
+    el_per_class = 50
     new_df = pd.DataFrame()
     embeddings_by_species = {}
     for item in df_validation["primary_label"].explode().unique():
@@ -264,48 +279,66 @@ def experimental_campaign(results_path, model_path, sample_rate, hop_length, n_f
     species_list = list(embeddings_by_species.keys())
     species_list_length = len(species_list)
 
-    cosine_similarity = {}
-    for species in species_list:
-        cosine_similarity[species] = {}
+    mode = "knn"
 
+    if mode == "cosine_similarity":
+        cosine_similarity = {}
+        for species in species_list:
+            cosine_similarity[species] = {}
 
-    embeddings = knn_label_consistency(embeddings, 2)
-    for key, item in embeddings.items():
-        print(key)
-        input(item)
+        avanzamento = 0
+        start = time.perf_counter()
+        
+        print("Specie "+str(avanzamento)+"/"+str(species_list_length))
+        for i in range(species_list_length):
+            species_1 = species_list[i]
+            avanzamento += 1
+            if avanzamento%50==0:
+                print("Specie "+str(avanzamento)+"/"+str(species_list_length))
+            for j in range(i,species_list_length):
+                species_2 = species_list[j]
+                cosine_similarity[species_1][species_2] = tensor_mean_cosine_similarity(species_1, species_2, embeddings_by_species, device)
+                cosine_similarity[species_2][species_1] = cosine_similarity[species_1][species_2]
+        
+        end = time.perf_counter()
+        print(f"Tempo: {end - start:.6f} secondi")
 
-    avanzamento = 0
-    start = time.perf_counter()
-    
-    print("Specie "+str(avanzamento)+"/"+str(species_list_length))
-    for i in range(species_list_length):
-        species_1 = species_list[i]
-        avanzamento += 1
-        if avanzamento%50==0:
-            print("Specie "+str(avanzamento)+"/"+str(species_list_length))
-        for j in range(i,species_list_length):
-            species_2 = species_list[j]
-            cosine_similarity[species_1][species_2] = tensor_mean_cosine_similarity(species_1, species_2, embeddings_by_species, device)
-            cosine_similarity[species_2][species_1] = cosine_similarity[species_1][species_2]
-    
-    end = time.perf_counter()
-    print(f"Tempo: {end - start:.6f} secondi")
+        print()
+        
+        cosine_similarity_path = results_path+"/cosine_similarity_"+str(hop_length)+"_"+str(n_fft)+"_"+str(n_mels)+".json"
+        with open(cosine_similarity_path, "w") as a:
+            json.dump(cosine_similarity, a)
 
-    print()
+        #
+        # VISUALIZZAZIONE
+        #
+        param_dict = {
+            "hops": hop_length
+            , "n_fft": n_fft
+            , "n_mels": n_mels
+        }
+        heatmap(cosine_similarity_path, param_dict, model_path)
+
+    elif mode == "knn":
+        start = time.perf_counter()
+        embeddings = knn_label_consistency(embeddings, 10)
+        end = time.perf_counter()
+        print(f"Tempo KNN-Consistency: {end - start:.6f} secondi")
+
+        knn_metric_summary = {}
+        for label in embeddings_by_species.keys():
+            sum_knn = 0
+            count = 0
+            for filename in embeddings_by_species[label].keys():
+                sum_knn += embeddings[filename]["knn_metric"]
+                count += 1
+            knn_metric_summary[label] = sum_knn/count
+        
+        knn_path = results_path+"/knn_consistency_"+str(hop_length)+"_"+str(n_fft)+"_"+str(n_mels)+".json"
+        with open(knn_path, "w") as a:
+            json.dump(knn_metric_summary, a)
+        
     
-    cosine_similarity_path = results_path+"/cosine_similarity_"+str(hop_length)+"_"+str(n_fft)+"_"+str(n_mels)+".json"
-    with open(cosine_similarity_path, "w") as a:
-        json.dump(cosine_similarity, a)
-    
-    #
-    # VISUALIZZAZIONE
-    #
-    param_dict = {
-        "hops": hop_length
-        , "n_fft": n_fft
-        , "n_mels": n_mels
-    }
-    heatmap(cosine_similarity_path, param_dict, model_path)
 
 
 if __name__ == "__main__":
