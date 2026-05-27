@@ -192,9 +192,11 @@ class BirdModel(nn.Module):
         # backbone pre-trained
         self.backbone = mobilenet_v2(weights=MobileNet_V2_Weights.DEFAULT)
 
-        # parameters freezing
+        # parameters freezing: removed for session_whole_model_training
+        """
         for p in self.backbone.features.parameters():
             p.requires_grad = False
+        """
 
         # Modifica primo layer per 1 canale (invece di 3)
         """

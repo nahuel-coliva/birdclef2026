@@ -162,14 +162,14 @@ def knn_label_consistency(embeddings, k=10):
         # Adjust indeces back to file names
         top_k_filenames = {}
         for index in top_k_indexes:
-            if index<=i:
-                top_k_filenames[a_list[index+1]] = top_k_indexes[index]
-            else:
+            if index<i:
                 top_k_filenames[a_list[index]] = top_k_indexes[index]
+            else:
+                top_k_filenames[a_list[index+1]] = top_k_indexes[index]
 
         knn_metric = 0
         for name in top_k_filenames.keys():
-            if not set(embeddings[a_list[i]]["labels"]).difference(set(embeddings[name]["labels"])):
+            if not set(embeddings[a_list[i]]["labels"]).difference(set(embeddings[name]["labels"])): # at least a label in common
                 knn_metric += 1
         knn_metric /= k
 

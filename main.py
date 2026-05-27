@@ -167,12 +167,13 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
                     trainable_pcen=True
                 ).to(device)
     optimizer = torch.optim.Adam([
-        {"params": model.backbone.features.parameters(), "lr": lr/10},
+        #{"params": model.backbone.features.parameters(), "lr": lr/10}, # fine tuning version
+        {"params": model.backbone.features.parameters(), "lr": lr}, # whole model version
         {"params": model.backbone.classifier.parameters(), "lr": lr},
         {"params": model.frontend.pcen.parameters(), "lr": lr/10}
     ])
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
-    #model.compile(mode="reduce-overhead", fullgraph=True) # Tried adding fullgraph=True for performance improvements
+    model.compile(mode="reduce-overhead", fullgraph=True) # Tried adding fullgraph=True for performance improvements
     print("Model compiled")
     use_bf16 = device == "cuda" and torch.cuda.is_bf16_supported()
     print(f"Mixed precision: {'bfloat16' if use_bf16 else 'disabled (float32)'}")
@@ -226,7 +227,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         list_val_rocauc = [0 for i in range(num_epochs)]
         starting_epoch = 0
 
-    fine_tuning_epoch_threshold = int(num_epochs*0.9)
+    fine_tuning_epoch_threshold = int(num_epochs*1.1) # removed fine tuning
 
     for epoch in range(starting_epoch, num_epochs):
         #DEBUG
@@ -257,8 +258,8 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         for x, y, _, _ in train_loader:
             #start_batch = time.perf_counter()
             batch += 1
-            if batch%10==0:
-                print("Batch "+str(batch)+"/"+str(int(total_batches/batch_size)))
+            if batch%5000==0:
+                print("Batch "+str(batch)+"/"+str(int(total_batches/batch_size))+" - Loss: "+str(loss.item()))
             x, y = x.to(device), y.to(device)
 
             """
@@ -311,7 +312,14 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
             y_pred_df = pd.DataFrame(probs.detach().cpu().numpy(), columns=species_list)
             y_pred_df.insert(0, "row_id", row_ids)
             
-            running_ROCAUC += birdCLEF_ROCAUC.score(solution=y_true, submission=y_pred_df, row_id_column_name="row_id") * x.size(0)
+            try:
+                running_ROCAUC += birdCLEF_ROCAUC.score(solution=y_true, submission=y_pred_df, row_id_column_name="row_id") * x.size(0)
+            except Exception as e:
+                print(e)
+                print(y_true)
+                print(y_pred_df)
+                print(y_true.shape)
+                print(y_pred_df.shape)
             #FINE DEBUG
 
             #end_batch = time.perf_counter()
@@ -410,10 +418,10 @@ if __name__ == "__main__":
     torch.cuda.memory.set_per_process_memory_fraction(1.0)
     
     sample_rate=32000
-    hops = [320]
-    n_fft = [320*4] #il default presente in documentazione è n_hops = floor(n_fft / 4)
+    hops = [160]
+    n_fft = [1280] #il default presente in documentazione è n_hops = floor(n_fft / 4)
     n_mels = [200]
-    session_ID = "performance_test"
+    session_ID = "whole_network_training"
 
     num_epochs = 30
 
