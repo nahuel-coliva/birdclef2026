@@ -39,7 +39,7 @@ def histogram(path, param_dict, results_path):
 if __name__ == "__main__":
     torch.cuda.memory.set_per_process_memory_fraction(1.0)
     
-    mode = "_"
+    mode = "ondemand"
     while mode not in ["ciclo", "ondemand"]:
         mode = input("ciclo o ondemand? ")
 

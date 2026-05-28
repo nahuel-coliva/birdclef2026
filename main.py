@@ -156,8 +156,9 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
 
     
     train_workers = 2
-    batch_size=32
+    batch_size=64
     lr = 0.01*batch_size/256
+    weight_decay = 0.00004
 
     model = custom_classes.BirdModel(num_classes=num_classes,
                     sample_rate=sample_rate,
@@ -166,12 +167,13 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
                     n_mels=n_mels,
                     trainable_pcen=True
                 ).to(device)
-    optimizer = torch.optim.Adam([
+    optimizer = torch.optim.AdamW([
         #{"params": model.backbone.features.parameters(), "lr": lr/10}, # fine tuning version
         {"params": model.backbone.features.parameters(), "lr": lr}, # whole model version
         {"params": model.backbone.classifier.parameters(), "lr": lr},
         {"params": model.frontend.pcen.parameters(), "lr": lr/10}
-    ])
+    ], weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
     model.compile(mode="reduce-overhead", fullgraph=True) # Tried adding fullgraph=True for performance improvements
     print("Model compiled")
@@ -213,7 +215,9 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         
         model.load_state_dict(state_dict)
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        starting_epoch = checkpoint["epoch"]
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        starting_epoch = checkpoint["epoch"] + 1
         print("Successfully loaded model "+str(results_path+"/model_checkpoint.pth"))
 
     except Exception as e:
@@ -404,9 +408,11 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         else:
             print("No previous checkpoint to be deleted")
         
+        scheduler.step()
         torch.save({
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
             "epoch": epoch,
         }, results_path+"/model_checkpoint.pth")
 
@@ -421,7 +427,7 @@ if __name__ == "__main__":
     hops = [160]
     n_fft = [1280] #il default presente in documentazione è n_hops = floor(n_fft / 4)
     n_mels = [200]
-    session_ID = "whole_network_training"
+    session_ID = "mobilenet_training_scheduler"
 
     num_epochs = 30
 

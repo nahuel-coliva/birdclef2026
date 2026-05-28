@@ -190,7 +190,7 @@ def experimental_campaign(results_path, model_path, sample_rate, hop_length, n_f
 
     #DF CREATION
     # Validation
-    df_validation = pd.read_csv("./data/cosine_similarity_labels.csv").drop_duplicates()
+    df_validation = pd.read_csv("./data/cosine_similarity_labels.csv").drop_duplicates() # son le stesse del validation set
     df_validation["start"] = pd.to_timedelta(df_validation["start"]).dt.total_seconds()
     df_validation["end"] = pd.to_timedelta(df_validation["end"]).dt.total_seconds()
     df_validation["primary_label"] = df_validation["primary_label"].str.split(";")
@@ -346,7 +346,7 @@ if __name__ == "__main__":
     
     mode = "_"
     while mode not in ["ciclo", "ondemand"]:
-        mode = "ciclo"#input("ciclo o ondemand? ")
+        mode = input("ciclo o ondemand? ")
 
     sample_rate = 32000
     
@@ -360,7 +360,7 @@ if __name__ == "__main__":
         hops = [int(input("Hops: "))]
         n_fft = [int(input("n_fft: "))]
         n_mels = [int(input("Mels: "))]
-        session_ID = input("Session ID (performance_test): ")
+        session_ID = input("Session ID (whole_network_training): ")
     
 
     for i in range(len(hops)):
