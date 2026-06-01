@@ -89,19 +89,26 @@ class F2M(nn.Module):
         return spec_m
 
 @torch.compile(mode="reduce-overhead")
-def compiled_M(x, s, T, device):
-    s_x = x.mul(s)
-    s_x[:,0,:] = x[:,0,:]
+def compiled_M(x, s, T, device, block_size=128):
+    chunks = []
+    last_m = x[:, 0, :]
 
-    # IMPORTANT! When x becomes too long (more than 2000) powers becomes inf, leading to nan values, thus errors
-    powers = (1 - s) ** -torch.arange(T, device=device, dtype=x.dtype)  # [T]
-    
-    # reshape per broadcasting: [1, T, 1]
-    powers = powers.view(1, T, 1)
-    
-    M = s_x * powers
-    M = torch.cumsum(M, dim=1) / powers
-    return M
+    for start in range(0, T, block_size):
+        end = min(start + block_size, T)
+        xb = x[:, start:end, :]
+        Tb = xb.shape[1]
+
+        powers = (1 - s) ** -torch.arange(Tb, device=device, dtype=x.dtype)
+        powers = powers.view(1, Tb, 1)
+
+        s_x = xb * s
+        s_x[:, 0, :] = (1 - s) * last_m + s * xb[:, 0, :] if start > 0 else xb[:, 0, :]
+
+        Mb = torch.cumsum(s_x * powers, dim=1) / powers
+        last_m = Mb[:, -1, :]
+        chunks.append(Mb)
+
+    return torch.cat(chunks, dim=1)
 
 @torch.compile(mode="reduce-overhead")
 def pcen(x, eps=1E-6, s=0.025, alpha=0.98, delta=2, r=0.5, training=False, last_state=None, empty=True):

@@ -53,6 +53,23 @@ def count_trainable_params(model):
 def count_total_params(model):
     return sum(p.numel() for p in model.parameters())
 
+def epoch_rocauc(y_true_batches, y_pred_batches, species_list):
+    y_true_tensor = torch.cat(y_true_batches, dim=0)
+    y_pred_tensor = torch.cat(y_pred_batches, dim=0)
+    row_ids = [f"soundscape_{i}_5" for i in range(y_true_tensor.size(0))]
+
+    y_true_df = pd.DataFrame(y_true_tensor.numpy(), columns=species_list)
+    y_true_df.insert(0, "row_id", row_ids)
+
+    y_pred_df = pd.DataFrame(y_pred_tensor.numpy(), columns=species_list)
+    y_pred_df.insert(0, "row_id", row_ids)
+
+    return birdCLEF_ROCAUC.score(
+        solution=y_true_df,
+        submission=y_pred_df,
+        row_id_column_name="row_id"
+    )
+
 def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, num_epochs):
     #warning policy
     warnings.filterwarnings("ignore", category=UserWarning)
@@ -253,8 +270,9 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         model.train()
         running_loss = 0.0
         running_f1 = 0.0
-        running_ROCAUC = 0.0
         running_recall = 0.0
+        train_y_true_batches = []
+        train_y_pred_batches = []
         total_batches = df_train.shape[0]
         batch = 0
 
@@ -303,29 +321,15 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
             loss.backward()
             optimizer.step()
 
+            with torch.no_grad():
+                model.frontend.pcen.s.clamp_(1e-4, 0.2)
+
             running_loss += loss.item() * x.size(0)
             probs = torch.sigmoid(outputs.float())
             running_f1 += batch_f1(y, probs) * x.size(0)
             running_recall += batch_recall(y, probs) * x.size(0)
-
-            #DEBUG: vanno sistemate le row_ids (che al momento non stanno venendo usate ma potrebbero)
-            row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y.size(0))]  # esempio row_id
-            y_true = pd.DataFrame(y.cpu().numpy(), columns=species_list)
-            y_true.insert(0, "row_id", row_ids)
-
-            y_pred_df = pd.DataFrame(probs.detach().cpu().numpy(), columns=species_list)
-            y_pred_df.insert(0, "row_id", row_ids)
-            
-            try:
-                running_ROCAUC += birdCLEF_ROCAUC.score(solution=y_true, submission=y_pred_df, row_id_column_name="row_id") * x.size(0)
-            except Exception as e:
-                print(e)
-                print(y_true)
-                print(y_pred_df)
-                print(y_true.shape)
-                print(y_pred_df.shape)
-                input()
-            #FINE DEBUG
+            train_y_true_batches.append(y.detach().cpu())
+            train_y_pred_batches.append(probs.detach().cpu())
 
             #end_batch = time.perf_counter()
             #input(f"Total batch time: {end_batch - start_batch:.6f} secondi")
@@ -336,8 +340,8 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
 
         epoch_loss = running_loss / len(train_loader.dataset)
         epoch_f1 = running_f1 / len(train_loader.dataset)
-        epoch_ROCAUC = running_ROCAUC / len(train_loader.dataset)
         epoch_recall = running_recall / len(train_loader.dataset)
+        epoch_ROCAUC = epoch_rocauc(train_y_true_batches, train_y_pred_batches, species_list)
 
         # -------------------
         # VALIDATION
@@ -345,8 +349,9 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         model.eval()
         val_loss = 0.0
         val_f1 = 0.0
-        val_ROCAUC = 0.0
         val_recall = 0.0
+        val_y_true_batches = []
+        val_y_pred_batches = []
         with torch.no_grad():
             for x_val, y_val, _, _ in val_loader:
                 x_val, y_val = x_val.to(device), y_val.to(device)
@@ -357,22 +362,13 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
                 probs_val = torch.sigmoid(outputs_val.float())
                 val_f1 += batch_f1(y_val, probs_val) * x_val.size(0)
                 val_recall += batch_recall(y_val, probs_val) * x_val.size(0)
-
-                #DEBUG: vanno sistemate le row_ids (che al momento non stanno venendo usate ma potrebbero)
-                row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y_val.size(0))]  # esempio row_id
-                y_val = pd.DataFrame(y_val.cpu().numpy(), columns=species_list)
-                y_val.insert(0, "row_id", row_ids)
-
-                y_val_pred_df = pd.DataFrame(probs_val.detach().cpu().numpy(), columns=species_list)
-                y_val_pred_df.insert(0, "row_id", row_ids)
-
-                val_ROCAUC += birdCLEF_ROCAUC.score(y_val, y_val_pred_df, row_id_column_name="row_id") * x_val.size(0)
-                #FINE DEBUG
+                val_y_true_batches.append(y_val.detach().cpu())
+                val_y_pred_batches.append(probs_val.detach().cpu())
 
         val_loss /= len(val_loader.dataset)
         val_f1 /= len(val_loader.dataset)
-        val_ROCAUC /= len(val_loader.dataset)
         val_recall /= len(val_loader.dataset)
+        val_ROCAUC = epoch_rocauc(val_y_true_batches, val_y_pred_batches, species_list)
 
         print(f"Epoch {epoch+1}/{num_epochs} "
             f"- Train Loss: {epoch_loss:.4f}, Train F1: {epoch_f1:.4f} "
