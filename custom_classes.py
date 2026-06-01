@@ -151,7 +151,7 @@ class PCENFrontend(nn.Module):
         return self.pcen.get_parameters()
     
 
-#@torch.compile(mode="reduce-overhead")
+@torch.compile(mode="reduce-overhead")
 def change_dimensions(x):
     return x.unsqueeze(1).repeat(1, 3, 1, 1)
 

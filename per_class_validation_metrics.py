@@ -266,10 +266,10 @@ if __name__ == "__main__":
     torch.cuda.memory.set_per_process_memory_fraction(1.0)
     
     sample_rate=32000
-    hops = [320]
-    n_fft = [320*4] #il default presente in documentazione è n_hops = floor(n_fft / 4)
+    hops = [160]
+    n_fft = [1280] #il default presente in documentazione è n_hops = floor(n_fft / 4)
     n_mels = [200]
-    session_ID = "1_point_5M_dataset_3_channels"
+    session_ID = "whole_network_training"
 
     num_epochs = 30
 
