@@ -433,6 +433,6 @@ if __name__ == "__main__":
 
     for i in range(len(hops)):
         for j in range(len(n_mels)):
-            results_path = "./results/session_"+str(session_ID)+"/"+str(hops[i])+"_"+str(n_mels[j])+"_FINE_TUNING_NAN"
+            results_path = "./results/session_"+str(session_ID)+"/"+str(hops[i])+"_"+str(n_mels[j])
             Path(results_path).mkdir(parents=True, exist_ok=True)
             experimental_campaign(results_path, sample_rate, hops[i], n_fft[i], n_mels[j], num_epochs=num_epochs)

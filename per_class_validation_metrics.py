@@ -52,6 +52,19 @@ def count_trainable_params(model):
 def count_total_params(model):
     return sum(p.numel() for p in model.parameters())
 
+def build_metric_dataframes(y_true_batches, y_pred_batches, species_list):
+    y_true_tensor = torch.cat(y_true_batches, dim=0)
+    y_pred_tensor = torch.cat(y_pred_batches, dim=0)
+    row_ids = [f"soundscape_{i}_5" for i in range(y_true_tensor.size(0))]
+
+    y_true_df = pd.DataFrame(y_true_tensor.numpy(), columns=species_list)
+    y_true_df.insert(0, "row_id", row_ids)
+
+    y_pred_df = pd.DataFrame(y_pred_tensor.numpy(), columns=species_list)
+    y_pred_df.insert(0, "row_id", row_ids)
+
+    return y_true_df, y_pred_df
+
 
 #
 # Keep the same validation code as the main loop, add per-class metrics
@@ -164,7 +177,7 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     print(max(pos_weights))"""
 
 
-    batch_size=128
+    batch_size=32
 
     model = custom_classes.BirdModel(num_classes=num_classes,
                     sample_rate=sample_rate,
@@ -176,8 +189,6 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor(pos_weights)).to(device)  # preferibile a BCE(sigmoid) per stabilità
     model.compile(mode="reduce-overhead")
     print("Model compiled")
-
-    input(model.get_pcen_parameters())
 
     # dataset: train_dataset e val_dataset già istanziati
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=True, pin_memory=True)
@@ -197,21 +208,23 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
         print(e)
         print("No previous run detected: setting up a new one")
 
+    print(model.get_pcen_parameters())
+
     # -------------------
     # VALIDATION
     # -------------------
     model.eval()
     val_loss = 0.0
     val_f1 = 0.0
-    val_ROCAUC = 0.0
     val_recall = 0.0
-    per_class_val_ROCAUC = np.zeros(len(species_list))
     spec_to_index_dict = {
         species_list[i]:i for i in range(len(species_list))
     }
-    spec_count_list = np.zeros(len(species_list))
+    val_y_true_batches = []
+    val_y_pred_batches = []
     with torch.no_grad():
         batch = 0
+        print("Batch "+str(batch+1)+"/"+str(int(df_validation.shape[0]/batch_size)))
         for x_val, y_val, _, _ in val_loader:
             batch += 1
             if batch%100==0:
@@ -221,34 +234,25 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
             outputs_val = model(x_val)
             loss_val = criterion(outputs_val, y_val)
             val_loss += loss_val.item() * x_val.size(0)
-            val_f1 += batch_f1(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
-            val_recall += batch_recall(y_val, torch.sigmoid(outputs_val)) * x_val.size(0)
-
-            #DEBUG: vanno sistemate le row_ids (che al momento non stanno venendo usate ma potrebbero)
-            row_ids = ["{}_{}".format(f"soundscape_{i}", 5) for i in range(y_val.size(0))]  # esempio row_id
-            y_val = pd.DataFrame(y_val.cpu().numpy(), columns=species_list)
-            y_val.insert(0, "row_id", row_ids)
-
-            y_val_pred_df = pd.DataFrame(torch.sigmoid(outputs_val).detach().cpu().numpy(), columns=species_list)
-            y_val_pred_df.insert(0, "row_id", row_ids)
-
-            val_ROCAUC += birdCLEF_ROCAUC.score(y_val.copy(), y_val_pred_df.copy(), row_id_column_name="row_id") * x_val.size(0)
-
-            batch_per_class_val_ROCAUC, scored_columns = birdCLEF_ROCAUC.per_class_score(y_val.copy(), y_val_pred_df.copy(), row_id_column_name="row_id")
-
-            i = 0
-            for spec in scored_columns:
-                spec_count_list[spec_to_index_dict[spec]] += 1
-                per_class_val_ROCAUC[spec_to_index_dict[spec]] += batch_per_class_val_ROCAUC[i]
-                i += 1
-
-            #FINE DEBUG
+            probs_val = torch.sigmoid(outputs_val)
+            val_f1 += batch_f1(y_val, probs_val) * x_val.size(0)
+            val_recall += batch_recall(y_val, probs_val) * x_val.size(0)
+            val_y_true_batches.append(y_val.detach().cpu())
+            val_y_pred_batches.append(probs_val.detach().cpu())
 
     val_loss /= len(val_loader.dataset)
     val_f1 /= len(val_loader.dataset)
-    val_ROCAUC /= len(val_loader.dataset)
     val_recall /= len(val_loader.dataset)
-    per_class_val_ROCAUC /= spec_count_list
+    y_val_df, y_val_pred_df = build_metric_dataframes(val_y_true_batches, val_y_pred_batches, species_list)
+    val_ROCAUC = birdCLEF_ROCAUC.score(y_val_df.copy(), y_val_pred_df.copy(), row_id_column_name="row_id")
+    scored_per_class_val_ROCAUC, scored_columns = birdCLEF_ROCAUC.per_class_score(
+        y_val_df.copy(),
+        y_val_pred_df.copy(),
+        row_id_column_name="row_id"
+    )
+    per_class_val_ROCAUC = np.full(len(species_list), np.nan)
+    for score, spec in zip(scored_per_class_val_ROCAUC, scored_columns):
+        per_class_val_ROCAUC[spec_to_index_dict[spec]] = score
 
     print(f"Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}")
     
@@ -266,10 +270,10 @@ if __name__ == "__main__":
     torch.cuda.memory.set_per_process_memory_fraction(1.0)
     
     sample_rate=32000
-    hops = [160]
+    hops = [320]
     n_fft = [1280] #il default presente in documentazione è n_hops = floor(n_fft / 4)
     n_mels = [200]
-    session_ID = "whole_network_training"
+    session_ID = "1_point_5M_dataset_3_channels"
 
     num_epochs = 30
 

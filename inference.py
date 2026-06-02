@@ -1,3 +1,5 @@
+# NEW
+
 import os
 import torch
 import librosa
@@ -95,18 +97,26 @@ class F2M(nn.Module):
         return spec_m
 
 
-def compiled_M(x, s, T, device):
-    s_x = x.mul(s)
-    s_x[:,0,:] = x[:,0,:]
+def compiled_M(x, s, T, device, block_size=128):
+    chunks = []
+    last_m = x[:, 0, :]
 
-    powers = (1 - s) ** -torch.arange(T, device=device)  # [T]
-    
-    # reshape per broadcasting: [1, T, 1]
-    powers = powers.view(1, T, 1)
-    
-    M = s_x * powers
-    M = torch.cumsum(M, dim=1) / powers
-    return M
+    for start in range(0, T, block_size):
+        end = min(start + block_size, T)
+        xb = x[:, start:end, :]
+        Tb = xb.shape[1]
+
+        powers = (1 - s) ** -torch.arange(Tb, device=device, dtype=x.dtype)
+        powers = powers.view(1, Tb, 1)
+
+        s_x = xb * s
+        s_x[:, 0, :] = (1 - s) * last_m + s * xb[:, 0, :] if start > 0 else xb[:, 0, :]
+
+        Mb = torch.cumsum(s_x * powers, dim=1) / powers
+        last_m = Mb[:, -1, :]
+        chunks.append(Mb)
+
+    return torch.cat(chunks, dim=1)
 
 
 def pcen(x, eps=1E-6, s=0.025, alpha=0.98, delta=2, r=0.5, training=False, last_state=None, empty=True):
@@ -204,10 +214,22 @@ class StreamingPCENTransform(nn.Module):
         window = self.window.to(device=x.device, dtype=x.dtype)
         x = torch.stft(x, self.n_fft, **self.stft_kwargs, window=window, return_complex=True).abs()
         x = self.f2m(x.permute(0, 2, 1))
-        if self.use_cuda_kernel:
-            x, ls = pcen(x, self.eps, self.s, self.alpha, self.delta, self.r, self.trainable, self.last_state, self.empty) #pcen_cuda_kernel
+
+        if self.trainable:
+            s = self.s.to(dtype=x.dtype)
+            alpha = self.alpha.to(dtype=x.dtype)
+            delta = self.delta.to(dtype=x.dtype)
+            r = self.r.to(dtype=x.dtype)
         else:
-            x, ls = pcen(x, self.eps, self.s, self.alpha, self.delta, self.r, self.training and self.trainable, self.last_state, self.empty)
+            s = self.s
+            alpha = self.alpha
+            delta = self.delta
+            r = self.r
+
+        if self.use_cuda_kernel:
+            x, ls = pcen(x, self.eps, s, alpha, delta, r, self.trainable, self.last_state, self.empty) #pcen_cuda_kernel
+        else:
+            x, ls = pcen(x, self.eps, s, alpha, delta, r, self.training and self.trainable, self.last_state, self.empty)
         self.last_state = ls.detach()
         self.empty = False
         return x
@@ -255,14 +277,15 @@ class PCENFrontend(nn.Module):
         #pcen = (pcen - pcen.mean(dim=-1, keepdim=True)) / (pcen.std(dim=-1, keepdim=True) + 1e-6)
         #ora trasormato in torch.nn.functional.layer_norm(pcen, (pcen.shape[-1],), eps=1e-6) per fonderlo nel CUDA graph
 
-        # Lascio come appunto se servisse ma alla fine abbiamo modificato il primo layer di MobileNet
-        #pcen = pcen.repeat(1, 3, 1, 1)  # 1 → 3 canali per input a MobileNetV2
+                                                                                                     
+                                                                                 
 
         return torch.nn.functional.layer_norm(pcen, (pcen.shape[-1],), eps=1e-6)
     
 
 def change_dimensions(x):
     return x.unsqueeze(1).repeat(1, 3, 1, 1)
+
 
 class BirdModel(nn.Module):
     def __init__(self,
@@ -273,7 +296,8 @@ class BirdModel(nn.Module):
                 n_mels=128,
                 trainable_pcen=True,
                 #DEBUG
-                epoch=0
+                epoch=0,
+                last_layer_flag=True #set to False to analyze extracted features
                 #FINE DEBUG
     ):
         super().__init__()
@@ -299,9 +323,11 @@ class BirdModel(nn.Module):
         # backbone pre-trained
         self.backbone = mobilenet_v2(weights=None)
 
-        # parameters freezing
+        # parameters freezing: removed for session_whole_model_training
+        """
         for p in self.backbone.features.parameters():
             p.requires_grad = False
+        """
 
         # Modifica primo layer per 1 canale (invece di 3)
         """
@@ -319,10 +345,11 @@ class BirdModel(nn.Module):
         """
 
         # testa di classificazione
-        in_features = self.backbone.classifier[1].in_features
-        self.backbone.classifier = nn.Sequential(
-            nn.Linear(in_features, num_classes)
-        )
+        if last_layer_flag:
+            in_features = self.backbone.classifier[1].in_features
+            self.backbone.classifier = nn.Sequential(
+                nn.Linear(in_features, num_classes)
+            )
 
     def forward(self, x):
         """
@@ -356,15 +383,16 @@ class BirdModel(nn.Module):
 
         return x
 
+
 # === CONFIG ===
-MODEL_PATH = "./results/session_1_point_5M_dataset_3_channels/320_200/model_checkpoint.pth"
-TEST_DIR = "./data/validation_soundscapes"
-TAXONOMY_PATH = "./data/taxonomy.csv"
+MODEL_PATH = ""
+TEST_DIR = "/kaggle/input/competitions/birdclef-2026/test_soundscapes"
+TAXONOMY_PATH = "/kaggle/input/competitions/birdclef-2026/taxonomy.csv"
 SR = 32000
 WINDOW = 5  # secondi
 DEVICE = "cpu"
-HOP_LENGTH = 320
-N_FFT = HOP_LENGTH*4
+HOP_LENGTH = 160
+N_FFT = 1280
 N_MELS = 200
 
 # === load class names ===
@@ -427,4 +455,4 @@ for fname in os.listdir(TEST_DIR):
 
 # === salva submission ===
 df = pd.DataFrame(rows)
-df.to_csv("./results/submission.csv", index=False)
+df.to_csv("submission.csv", index=False)
