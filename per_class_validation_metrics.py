@@ -65,6 +65,17 @@ def build_metric_dataframes(y_true_batches, y_pred_batches, species_list):
 
     return y_true_df, y_pred_df
 
+def plot_metric(train_values, val_values, name, path):
+    plt.figure()
+    plt.plot(train_values, label="train")
+    plt.plot(val_values, label="validation")
+    plt.xlabel("epoch")
+    plt.ylabel(name)
+    plt.legend()
+    plt.title(f"Train vs Validation {name}")
+    plt.savefig(path)
+    plt.close()
+
 
 #
 # Keep the same validation code as the main loop, add per-class metrics
@@ -176,6 +187,24 @@ def experimental_campaign(results_path, sample_rate, hop_length, n_fft, n_mels, 
     print(min(pos_weights))
     print(max(pos_weights))"""
 
+    """
+    # LOAD TRAINING METRICS
+    with open(results_path+"/list_train_loss.json", "r") as a, open(results_path+"/list_train_recall.json", "r") as b, open(results_path+"/list_train_rocauc.json", "r") as c:
+        list_train_loss = json.load(a)
+        list_train_recall = json.load(b)
+        list_train_rocauc = json.load(c)
+
+    with open(results_path+"/list_val_loss.json", "r") as d, open(results_path+"/list_val_recall.json", "r") as e, open(results_path+"/list_val_rocauc.json", "r") as f:
+        list_val_loss = json.load(d)
+        list_val_recall = json.load(e)
+        list_val_rocauc = json.load(f)
+    
+    plot_metric(list_train_loss, list_val_loss, "loss", results_path+"/train_vs_validation_loss.png")
+    plot_metric(list_train_recall, list_val_recall, "recall", results_path+"/train_vs_validation_recall.png")
+    plot_metric(list_train_rocauc, list_val_rocauc, "rocauc", results_path+"/train_vs_validation_rocauc.png")
+
+    input("Immagini plottate, vuoi continuare?")
+    """
 
     batch_size=32
 
@@ -270,15 +299,14 @@ if __name__ == "__main__":
     torch.cuda.memory.set_per_process_memory_fraction(1.0)
     
     sample_rate=32000
-    hops = [320]
+    hops = [160]
     n_fft = [1280] #il default presente in documentazione è n_hops = floor(n_fft / 4)
     n_mels = [200]
-    session_ID = "1_point_5M_dataset_3_channels"
-
+    session_ID = "mobilenet_training_scheduler"
     num_epochs = 30
 
     for i in range(len(hops)):
         for j in range(len(n_mels)):
-            results_path = "./results/session_"+str(session_ID)+"/"+str(hops[i])+"_"+str(n_mels[j])
+            results_path = "./results/session_"+str(session_ID)+"/"+str(hops[i])+"_"+str(n_mels[j])+"/model_checkpoint_6"
             Path(results_path).mkdir(parents=True, exist_ok=True)
             experimental_campaign(results_path, sample_rate, hops[i], n_fft[i], n_mels[j], num_epochs=num_epochs)
